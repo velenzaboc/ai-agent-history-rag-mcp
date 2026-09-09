@@ -40,7 +40,14 @@ require_literal "$UNINSTALLER" 'Unregister-ScheduledTask' "deterministic task st
 pass "PowerShell sources require native production-only task shape"
 
 if command -v pwsh >/dev/null 2>&1; then
-  pwsh -NoLogo -NoProfile -Command "[ScriptBlock]::Create([IO.File]::ReadAllText('$INSTALLER')) | Out-Null; [ScriptBlock]::Create([IO.File]::ReadAllText('$UNINSTALLER')) | Out-Null"
+  installer_for_pwsh="$INSTALLER"
+  uninstaller_for_pwsh="$UNINSTALLER"
+  if command -v cygpath >/dev/null 2>&1; then
+    installer_for_pwsh="$(cygpath -w -- "$INSTALLER")"
+    uninstaller_for_pwsh="$(cygpath -w -- "$UNINSTALLER")"
+  fi
+  INSTALLER_FOR_PWSH="$installer_for_pwsh" UNINSTALLER_FOR_PWSH="$uninstaller_for_pwsh" \
+    pwsh -NoLogo -NoProfile -Command '[ScriptBlock]::Create([IO.File]::ReadAllText($env:INSTALLER_FOR_PWSH)) | Out-Null; [ScriptBlock]::Create([IO.File]::ReadAllText($env:UNINSTALLER_FOR_PWSH)) | Out-Null'
   pass "PowerShell parser accepts task scripts"
 else
   pass "PowerShell runtime unavailable on macOS; static validation completed"

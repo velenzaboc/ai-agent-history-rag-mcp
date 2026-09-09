@@ -35,6 +35,39 @@ assert_success() {
   pass "$label"
 }
 
+windows_acl_principal() {
+  if [[ -n "${USERDOMAIN-}" && -n "${USERNAME-}" ]]; then
+    printf '%s\\%s' "$USERDOMAIN" "$USERNAME"
+    return 0
+  fi
+  powershell.exe -NoProfile -NonInteractive -Command \
+    '[Environment]::UserDomainName + "\\" + [Environment]::UserName' \
+    | tr -d '\r\n'
+}
+
+restrict_file_acl() {
+  local path="$1"
+  chmod 600 "$path"
+  if [[ -n "${MSYSTEM-}" ]]; then
+    local windows_path principal
+    windows_path="$(cygpath -w -- "$path")"
+    principal="$(windows_acl_principal)"
+    icacls.exe "$windows_path" /inheritance:r /grant:r "${principal}:(F)" >/dev/null
+  fi
+}
+
+loosen_file_acl() {
+  local path="$1"
+  if [[ -n "${MSYSTEM-}" ]]; then
+    local windows_path principal
+    windows_path="$(cygpath -w -- "$path")"
+    principal="$(windows_acl_principal)"
+    icacls.exe "$windows_path" /inheritance:r /grant:r "${principal}:(F)" 'BUILTIN\Users:(R)' >/dev/null
+  else
+    chmod 644 "$path"
+  fi
+}
+
 write_adc() {
   local path="$1"
   local source_type="$2"
@@ -53,12 +86,17 @@ write_adc() {
             {type: "authorized_user", client_id: "synthetic-client", client_secret: "synthetic-secret", refresh_token: "synthetic-refresh"}
           else
             {
-              type: $source_type,
-              client_email: "synthetic@example.invalid",
+              type: "service_account",
+              project_id: "sample-project",
+              private_key_id: "synthetic-key-id",
+              private_key: "fixture-private-key-material",
+              client_email: "device-source@sample-project.iam.gserviceaccount.com",
               token_uri: "https://oauth2.googleapis.com/token",
               client_id: "synthetic-client",
-              client_secret: "synthetic-secret",
-              refresh_token: "synthetic-refresh"
+              auth_uri: "https://accounts.google.com/o/oauth2/auth",
+              auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
+              client_x509_cert_url: "https://www.googleapis.com/robot/v1/metadata/x509/device-source%40sample-project.iam.gserviceaccount.com",
+              universe_domain: "googleapis.com"
             }
           end
         ),
@@ -70,7 +108,7 @@ write_adc() {
       }
       | if $include_private then .metadata = {nested: [{private_key: "DO_NOT_PRINT_PRIVATE_FIXTURE"}]} else . end
     ' >"$path"
-  chmod 600 "$path"
+  restrict_file_acl "$path"
 }
 
 fixture_env() {
@@ -122,7 +160,13 @@ valid="$TMP_ROOT/valid"
 mkdir -p "$valid"
 write_adc "$valid/adc.json" authorized_user false '[]' "$identity"
 fixture_env "$valid" "$valid/adc.json" impersonated_service_account
-assert_success "valid exact-target keyless ADC" run_fixture --validate-only
+assert_success "valid exact-target user ADC" run_fixture --validate-only
+
+device="$TMP_ROOT/device-service-account"
+mkdir -p "$device"
+write_adc "$device/adc.json" service_account false '[]' "$identity"
+fixture_env "$device" "$device/adc.json" impersonated_service_account
+assert_success "valid device-sourced ADC" run_fixture --validate-only
 
 production_shape_mutations=(
   'CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT|development'
@@ -154,7 +198,16 @@ nested="$TMP_ROOT/nested-service-account"
 mkdir -p "$nested"
 write_adc "$nested/adc.json" service_account false '[]' "$identity"
 fixture_env "$nested" "$nested/adc.json" impersonated_service_account
-assert_failure "nested service-account source rejected" run_fixture --validate-only
+assert_success "nested service-account source accepted" run_fixture --validate-only
+
+unsupported_source="$TMP_ROOT/unsupported-source"
+mkdir -p "$unsupported_source"
+write_adc "$unsupported_source/adc.json" authorized_user false '[]' "$identity"
+jq '.source_credentials.type = "external_account"' "$unsupported_source/adc.json" >"$unsupported_source/rewritten.json"
+mv "$unsupported_source/rewritten.json" "$unsupported_source/adc.json"
+restrict_file_acl "$unsupported_source/adc.json"
+fixture_env "$unsupported_source" "$unsupported_source/adc.json" impersonated_service_account
+assert_failure "unsupported nested source type rejected" run_fixture --validate-only
 
 private="$TMP_ROOT/private-marker"
 mkdir -p "$private"
@@ -181,7 +234,7 @@ assert_failure "wrong impersonation target rejected" run_fixture --validate-only
 loose="$TMP_ROOT/loose-mode"
 mkdir -p "$loose"
 write_adc "$loose/adc.json" authorized_user false '[]' "$identity"
-chmod 644 "$loose/adc.json"
+loosen_file_acl "$loose/adc.json"
 fixture_env "$loose" "$loose/adc.json" impersonated_service_account
 assert_failure "group-readable ADC rejected" run_fixture --validate-only
 
@@ -210,7 +263,7 @@ network="$TMP_ROOT/network-order"
 mkdir -p "$network/bin"
 printf '#!/usr/bin/env bash\nprintf invoked >%q\nprintf "{\\"ok\\":true}\\n200"\n' "$network/curl-invoked" >"$network/bin/curl"
 chmod +x "$network/bin/curl"
-write_adc "$network/adc.json" service_account false '[]' "$identity"
+write_adc "$network/adc.json" service_account true '[]' "$identity"
 fixture_env "$network" "$network/adc.json" impersonated_service_account
 FIXTURE_ENV[1]="PATH=$network/bin:$PATH"
 # shellcheck disable=SC2119
@@ -223,8 +276,8 @@ pass "production gate precedes network client"
 protocol="$TMP_ROOT/protocol"
 mkdir -p "$protocol/bin"
 # shellcheck disable=SC2016
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>%q\nif [[ -r /dev/fd/3 ]]; then cat /dev/fd/3 >>%q; fi\nbody=""\nif [[ " $* " == *" --data-binary @- "* ]]; then body="$(cat)"; fi\nprintf "%%s\\n---\\n" "$body" >>%q\nprintf "{\\"ok\\":true,\\"route\\":\\"daemon\\"}\\n200"\n' \
-  "$protocol/curl-args" "$protocol/curl-headers" "$protocol/curl-bodies" >"$protocol/bin/curl"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>%q\nheader_file=""\nprevious=""\nfor argument in "$@"; do\n  if [[ "$previous" == "--header" && "$argument" == @* ]]; then header_file="${argument#@}"; fi\n  previous="$argument"\ndone\nif [[ -n "$header_file" && -r "$header_file" ]]; then cat "$header_file" >>%q; elif [[ -r /dev/fd/3 ]]; then cat /dev/fd/3 >>%q; fi\nbody=""\nif [[ " $* " == *" --data-binary @- "* ]]; then body="$(cat)"; fi\nprintf "%%s\\n---\\n" "$body" >>%q\nprintf "{\\"ok\\":true,\\"route\\":\\"daemon\\"}\\n200"\n' \
+  "$protocol/curl-args" "$protocol/curl-headers" "$protocol/curl-headers" "$protocol/curl-bodies" >"$protocol/bin/curl"
 chmod +x "$protocol/bin/curl"
 write_adc "$protocol/adc.json" authorized_user false '[]' "$identity"
 fixture_env "$protocol" "$protocol/adc.json" impersonated_service_account
@@ -268,12 +321,12 @@ pass "daemon authorization is not carried in argv"
 
 auth_state="$TMP_ROOT/auth-state"
 mkdir -p "$auth_state/bin" "$auth_state/home/.claude-history-rag"
-printf '#!/usr/bin/env bash\nprintf invoked >%q\nif [[ -r /dev/fd/3 ]]; then cat /dev/fd/3 >%q; fi\nprintf "{\\"ok\\":true}\\n200"\n' \
-  "$auth_state/curl-invoked" "$auth_state/curl-header" >"$auth_state/bin/curl"
+printf '#!/usr/bin/env bash\nprintf invoked >%q\nheader_file=""\nprevious=""\nfor argument in "$@"; do\n  if [[ "$previous" == "--header" && "$argument" == @* ]]; then header_file="${argument#@}"; fi\n  previous="$argument"\ndone\nif [[ -n "$header_file" && -r "$header_file" ]]; then cat "$header_file" >%q; elif [[ -r /dev/fd/3 ]]; then cat /dev/fd/3 >%q; fi\nprintf "{\\"ok\\":true}\\n200"\n' \
+  "$auth_state/curl-invoked" "$auth_state/curl-header" "$auth_state/curl-header" >"$auth_state/bin/curl"
 chmod +x "$auth_state/bin/curl"
 write_adc "$auth_state/adc.json" authorized_user false '[]' "$identity"
 jq -n '{active:{key_plain:"SYNTHETIC_AUTH_STATE_PSK"}}' >"$auth_state/home/.claude-history-rag/auth.json"
-chmod 600 "$auth_state/home/.claude-history-rag/auth.json"
+restrict_file_acl "$auth_state/home/.claude-history-rag/auth.json"
 fixture_env "$auth_state" "$auth_state/adc.json" impersonated_service_account
 FIXTURE_ENV[1]="PATH=$auth_state/bin:$PATH"
 FIXTURE_ENV+=("CLAUDE_HISTORY_RAG_AUTH_ENABLED=true")
@@ -284,10 +337,10 @@ FIXTURE_ENV+=("CLAUDE_HISTORY_RAG_AUTH_ENABLED=true")
 } | run_fixture >"$auth_state/output" 2>"$auth_state/stderr"
 grep -Eq '^Authorization: Bearer SYNTHETIC_AUTH_STATE_PSK$' "$auth_state/curl-header" || fail "active auth-state PSK was not forwarded"
 pass "owner-only daemon auth state is supported"
-chmod 644 "$auth_state/home/.claude-history-rag/auth.json"
+loosen_file_acl "$auth_state/home/.claude-history-rag/auth.json"
 rm -f "$auth_state/curl-invoked"
 assert_failure "permissive daemon auth state rejected" run_fixture --validate-only
-chmod 600 "$auth_state/home/.claude-history-rag/auth.json"
+restrict_file_acl "$auth_state/home/.claude-history-rag/auth.json"
 
 install="$TMP_ROOT/install"
 mkdir -p "$install"
@@ -295,7 +348,7 @@ write_adc "$install/adc.json" authorized_user false '[]' "$identity"
 fixture_env "$install" "$install/adc.json" impersonated_service_account
 FIXTURE_ENV+=("CLAUDE_HISTORY_RAG_SERVER_PSK=SYNTHETIC_INSTALLER_PSK_MUST_NOT_PERSIST")
 printf '{"preserved":true,"mcpServers":{}}\n' >"$install/config.json"
-chmod 600 "$install/config.json"
+restrict_file_acl "$install/config.json"
 assert_success "native JSON installer" run_fixture --install-json "$install/config.json" "$MCP_SCRIPT"
 jq -e --arg command "$MCP_SCRIPT" '
   .preserved == true and

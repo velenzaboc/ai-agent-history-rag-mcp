@@ -63,6 +63,13 @@ configuration are rejected. In particular, leave `GOOGLE_APPLICATION_CREDENTIALS
 `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, `CLOUDSDK_CONFIG`, and
 `SPANNER_EMULATOR_HOST` unset.
 
+The carrier may retain the legacy `authorized_user` source or use a
+device-bound `service_account` source. The latter is accepted only inside the
+validated impersonation carrier; its target identity, scope, quota project,
+source shape, and owner-only file ACL are checked before any Google client is
+constructed. Do not commit a carrier, private key, refresh token, or machine
+path to this repository.
+
 ## Source roots
 
 The daemon watches exactly these six source families. Platform installers create

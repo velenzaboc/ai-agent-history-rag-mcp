@@ -21,6 +21,13 @@ host/port, impersonated ADC selector, service-account identity, and bearer
 secret. The process refuses missing, unknown, or substituted values. It also
 refuses credential-file, emulator, and ambient Cloud SDK overrides.
 
+The well-known carrier accepts either the legacy `authorized_user` source or a
+device-bound `service_account` source. A service-account source is legal only
+as the nested source of that pinned impersonation carrier; private-key fields
+outside that object, unapproved source fields, target drift, and non-owner ACLs
+are rejected. Credential material and machine-specific paths remain deployment
+state, never repository content.
+
 ## Source and state boundary
 
 Configuration carries six unique absolute roots: Claude Code, Codex, Gemini,
