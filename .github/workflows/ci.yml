@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-quality:
+    uses: no13productions/no13-infra/.github/workflows/go-service-ci.yml@9b4a08a8a8c2a0d357ab878328ca35579f9cd5f6
+    with:
+      service_name: ai-agent-history-rag-mcp
+      min_coverage: "85"
+      coverage_scope: per-package
+      # The default reusable-workflow runner covers the shared Linux/Darwin
+      # implementation and both parser arms. Windows owns distinct security-
+      # bound filesystem and process primitives, so it contributes a required
+      # native execution profile to the final coverage union.
+      coverage_targets: >-
+        [{"id":"windows-amd64","goos":"windows","goarch":"amd64","tags":[]}]
+      build_image: true
+    secrets: inherit
+
+  native-mcp-security:
+    name: native MCP security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Verify native prerequisites
+        run: for tool in bash jq curl grep awk; do command -v "$tool"; done
+
+      - name: Shell syntax
+        run: bash -n scripts/history-rag-mcp-native.sh scripts/history-rag-mcp-native.test.sh scripts/history-rag-mcp-native.mutation.test.sh scripts/docker-native.test.sh scripts/systemd-native.test.sh scripts/launchd-native.test.sh scripts/windows-native.test.sh scripts/docs-native-contract.test.sh scripts/start.sh
+
+      - name: Native MCP security contract
+        run: bash scripts/history-rag-mcp-native.test.sh
+
+      - name: Native deployment and documentation contracts
+        run: |
+          bash scripts/docker-native.test.sh
+          bash scripts/systemd-native.test.sh
+          bash scripts/launchd-native.test.sh
+          bash scripts/windows-native.test.sh
+          bash scripts/docs-native-contract.test.sh
+
+      - name: Mutation strength
+        run: bash scripts/history-rag-mcp-native.mutation.test.sh

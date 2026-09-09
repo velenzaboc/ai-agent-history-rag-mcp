@@ -1,0 +1,77 @@
+{
+  "version": "1.0.0",
+  "payload_limits": [
+    {"name": "chunk_upload", "max_bytes": 1048576, "inclusive": true},
+    {"name": "mcp_stdio", "max_bytes": 1048576, "inclusive": true}
+  ],
+  "mcp_tools": [
+    {"name": "search_conversations", "method": "POST", "path": "/api/search", "max_request_bytes": 1048576},
+    {"name": "search_file_changes", "method": "POST", "path": "/api/search/files", "max_request_bytes": 1048576},
+    {"name": "get_session_summary", "method": "POST", "path": "/api/sessions", "max_request_bytes": 1048576},
+    {"name": "get_index_status", "method": "GET", "path": "/status?detail=full", "max_request_bytes": 1048576},
+    {"name": "get_server_status", "method": "GET", "path": "/status?detail={basic|full}", "max_request_bytes": 1048576}
+  ],
+  "http_endpoints": [
+    {"method": "GET", "path": "/", "authentication": "dashboard_hash", "payload": "dashboard_html"},
+    {"method": "GET", "path": "/dashboard", "authentication": "dashboard_hash", "payload": "dashboard_html"},
+    {"method": "GET", "path": "/status", "authentication": "bearer", "payload": "status"},
+    {"method": "GET", "path": "/health", "authentication": "bearer", "payload": "health"},
+    {"method": "GET", "path": "/metrics", "authentication": "bearer", "payload": "prometheus"},
+    {"method": "POST", "path": "/trigger-index", "authentication": "bearer", "payload": "index_trigger"},
+    {"method": "POST", "path": "/trigger-reindex", "authentication": "bearer", "payload": "reindex_trigger"},
+    {"method": "POST", "path": "/api/chunks", "authentication": "bearer", "payload": "chunk_upload"},
+    {"method": "POST", "path": "/api/search", "authentication": "bearer", "payload": "conversation_search"},
+    {"method": "POST", "path": "/api/search/files", "authentication": "bearer", "payload": "file_search"},
+    {"method": "POST", "path": "/api/sessions", "authentication": "bearer", "payload": "session_summary"},
+    {"method": "GET", "path": "/api/positions/{machine_id}", "authentication": "bearer", "payload": "positions"},
+    {"method": "POST", "path": "/api/positions", "authentication": "bearer", "payload": "position_sync"},
+    {"method": "POST", "path": "/api/reindex-ack", "authentication": "bearer", "payload": "reindex_ack"},
+    {"method": "POST", "path": "/api/purge-client", "authentication": "bearer", "payload": "purge_client"},
+    {"method": "POST", "path": "/api/heartbeat", "authentication": "bearer", "payload": "heartbeat"},
+    {"method": "GET", "path": "/api/auth/state", "authentication": "bearer", "payload": "auth_state"},
+    {"method": "POST", "path": "/api/auth/rotate", "authentication": "bearer", "payload": "auth_rotate"},
+    {"method": "POST", "path": "/api/auth/allowlist-keep", "authentication": "bearer", "payload": "auth_allowlist"},
+    {"method": "POST", "path": "/api/auth/rotation-error", "authentication": "bearer", "payload": "auth_rotation_error"},
+    {"method": "POST", "path": "/api/auth/rotation-ack", "authentication": "bearer", "payload": "auth_rotation_ack"},
+    {"method": "GET", "path": "/api/auth/dashboard-hash", "authentication": "bearer", "payload": "dashboard_hash"},
+    {"method": "POST", "path": "/api/auth/key", "authentication": "bearer", "payload": "auth_key"}
+  ],
+  "sources": [
+    {"name": "claude_code", "root_env": "CLAUDE_HISTORY_RAG_PROJECTS_PATH", "default_root": "$HOME/.claude/projects", "state_env": "CLAUDE_HISTORY_RAG_STATE_PATH", "default_state": "$HOME/.claude-history-rag/state.json"},
+    {"name": "codex", "root_env": "CLAUDE_HISTORY_RAG_CODEX_SESSIONS_PATH", "default_root": "$HOME/.codex/sessions", "state_env": "CLAUDE_HISTORY_RAG_CODEX_STATE_PATH", "default_state": "$HOME/.claude-history-rag/codex_state.json"},
+    {"name": "gemini", "root_env": "CLAUDE_HISTORY_RAG_GEMINI_SESSIONS_PATH", "default_root": "$HOME/.gemini/tmp", "state_env": "CLAUDE_HISTORY_RAG_GEMINI_STATE_PATH", "default_state": "$HOME/.claude-history-rag/gemini_state.json"},
+    {"name": "antigravity", "root_env": "CLAUDE_HISTORY_RAG_ANTIGRAVITY_SESSIONS_PATH", "default_root": "$HOME/.gemini/antigravity", "state_env": "CLAUDE_HISTORY_RAG_ANTIGRAVITY_STATE_PATH", "default_state": "$HOME/.claude-history-rag/antigravity_state.json"},
+    {"name": "chatgpt_export", "root_env": "CLAUDE_HISTORY_RAG_CHATGPT_EXPORTS_PATH", "default_root": "$HOME/.claude-history-rag/imports/chatgpt", "state_env": "CLAUDE_HISTORY_RAG_CHATGPT_STATE_PATH", "default_state": "$HOME/.claude-history-rag/chatgpt_state.json"},
+    {"name": "claude_app_export", "root_env": "CLAUDE_HISTORY_RAG_CLAUDE_APP_EXPORTS_PATH", "default_root": "$HOME/.claude-history-rag/imports/claude-app", "state_env": "CLAUDE_HISTORY_RAG_CLAUDE_APP_STATE_PATH", "default_state": "$HOME/.claude-history-rag/claude_app_state.json"}
+  ],
+  "environment": [
+    {"name": "CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT", "required": true, "purpose": "production contract selector"},
+    {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE", "required": true, "purpose": "Google credential source"},
+    {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE", "required": true, "purpose": "Google credential profile"},
+    {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY", "required": true, "purpose": "bound Google service account"},
+    {"name": "CLAUDE_HISTORY_RAG_STORAGE_BACKEND", "required": true, "purpose": "storage backend"},
+    {"name": "CLAUDE_HISTORY_RAG_SPANNER_PROJECT", "required": true, "purpose": "Spanner project"},
+    {"name": "CLAUDE_HISTORY_RAG_SPANNER_INSTANCE", "required": true, "purpose": "Spanner instance"},
+    {"name": "CLAUDE_HISTORY_RAG_SPANNER_DATABASE", "required": true, "purpose": "Spanner database"},
+    {"name": "CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE", "required": true, "purpose": "embedding execution mode"},
+    {"name": "CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID", "required": true, "purpose": "Spanner model identifier"},
+    {"name": "CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER", "required": true, "purpose": "embedding provider"},
+    {"name": "CLAUDE_HISTORY_RAG_EMBEDDING_MODEL", "required": true, "purpose": "embedding model"},
+    {"name": "CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION", "required": true, "purpose": "embedding vector dimension"},
+    {"name": "CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST", "required": true, "purpose": "loopback status listener host"},
+    {"name": "CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT", "required": true, "purpose": "status listener port"},
+    {"name": "CLAUDE_HISTORY_RAG_AUTH_ENABLED", "required": true, "purpose": "daemon authentication switch"},
+    {"name": "CLAUDE_HISTORY_RAG_AUTH_STATE_PATH", "required": false, "purpose": "server authentication state"},
+    {"name": "CLAUDE_HISTORY_RAG_CLIENT_AUTH_PATH", "required": false, "purpose": "client authentication state"},
+    {"name": "CLAUDE_HISTORY_RAG_SERVER_URL", "required": false, "purpose": "central server URL for client mode"},
+    {"name": "CLAUDE_HISTORY_RAG_MACHINE_ID", "required": false, "purpose": "stable client machine identity"},
+    {"name": "CLAUDE_HISTORY_RAG_CLIENT_NAME", "required": false, "purpose": "client display label"}
+  ],
+  "entrypoints": [
+    {"name": "docker", "platform": "container", "current": ["history-ragd", "start"], "replacement": ["history-ragd", "start"]},
+    {"name": "systemd", "platform": "linux", "current": ["history-ragd", "supervise"], "replacement": ["history-ragd", "supervise"]},
+    {"name": "launchd", "platform": "darwin", "current": ["history-ragd", "supervise"], "replacement": ["history-ragd", "supervise"]},
+    {"name": "scheduled_task", "platform": "windows", "current": ["history-ragd.exe", "supervise"], "replacement": ["history-ragd.exe", "supervise"]},
+    {"name": "mcp_stdio", "platform": "all", "current": ["scripts/history-rag-mcp-native.sh"], "replacement": ["scripts/history-rag-mcp-native.sh"]}
+  ]
+}

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ai-agent-history-rag.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HISTORY_RAGD_BIN__</string>
+    <string>supervise</string>
+    <string>--config</string>
+    <string>__CONFIG_PATH__</string>
+  </array>
+  <key>WorkingDirectory</key><string>__PROJECT_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT</key><string>production</string>
+    <key>CLAUDE_HISTORY_RAG_STORAGE_BACKEND</key><string>spanner</string>
+    <key>CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE</key><string>spanner</string>
+    <key>CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID</key><string>ConversationEmbeddingModel</string>
+    <key>CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER</key><string>vertex</string>
+    <key>CLAUDE_HISTORY_RAG_EMBEDDING_MODEL</key><string>gemini-embedding-001</string>
+    <key>CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION</key><string>3072</string>
+    <key>CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST</key><string>127.0.0.1</string>
+    <key>CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT</key><string>4680</string>
+    <key>CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE</key><string>application_default</string>
+    <key>CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE</key><string>impersonated_service_account</string>
+    <key>CLAUDE_HISTORY_RAG_SPANNER_PROJECT</key><string>__SPANNER_PROJECT__</string>
+    <key>CLAUDE_HISTORY_RAG_SPANNER_INSTANCE</key><string>__SPANNER_INSTANCE__</string>
+    <key>CLAUDE_HISTORY_RAG_SPANNER_DATABASE</key><string>__SPANNER_DATABASE__</string>
+    <key>CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY</key><string>__CREDENTIALS_IDENTITY__</string>
+    <key>CLAUDE_HISTORY_RAG_SERVER_PSK</key><string>__SERVER_PSK__</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>AbandonProcessGroup</key><false/>
+  <key>StandardOutPath</key><string>__STATE_DIR__/launchd-stdout.log</string>
+  <key>StandardErrorPath</key><string>__STATE_DIR__/launchd-stderr.log</string>
+</dict>
+</plist>

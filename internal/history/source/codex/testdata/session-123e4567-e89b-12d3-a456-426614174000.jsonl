@@ -1,0 +1,8 @@
+{"type":"session_meta","payload":{"id":"thread-42","cwd":"/work/codex-project"}}
+{"type":"turn_context","payload":{"cwd":"/work/codex-project","model":"gpt-5"}}
+{"type":"response_item","timestamp":"2026-09-09T12:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the parser"}]}}
+not-json
+{"type":"response_item","timestamp":"2026-09-09T12:00:01Z","payload":{"type":"reasoning","summary":["Inspect input","Plan change"]}}
+{"type":"response_item","timestamp":"2026-09-09T12:00:02Z","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"patch\":\"*** Update File: parser.go\\n*** Add File: test.go\"}"}}
+{"type":"response_item","timestamp":"2026-09-09T12:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Parser updated."}]}}
+{"type":"event_msg","timestamp":"2026-09-09T12:00:04Z","payload":{"type":"user_message","message":"A standalone event"}}

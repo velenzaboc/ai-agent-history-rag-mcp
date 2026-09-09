@@ -1,0 +1,3 @@
+{"id":"event-1","source":"user","type":"message","status":"done","created_at":"2026-09-09T12:00:00Z","step_index":1,"content":"Fix it","thinking":"plan","tool_calls":[{"id":"call-1","name":"apply_patch","args":{"patch":"*** Update File: main.go\n*** Add File: main_test.go"}}]}
+not-json
+{"id":"event-2","source":"agent","type":"tool","status":"done","step_index":2,"content":"Done","tool_calls":[{"name":"shell","args":"rm old.go"}]}

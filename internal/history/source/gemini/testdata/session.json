@@ -1,0 +1,10 @@
+{
+  "sessionId": "gemini-session-1",
+  "conversationId": "conversation-1",
+  "messages": [
+    {"id":"u1","type":"user","timestamp":"2026-09-09T12:00:00Z","content":"Fix the loader"},
+    {"id":"g1","type":"gemini","timestamp":"2026-09-09T12:00:01Z","model":"gemini-2.5","content":"I updated it.","thoughts":["Inspect source"],"toolCalls":[{"id":"call1","name":"apply_patch","args":{"patch":"*** Update File: loader.go\n*** Add File: loader_test.go"}}]},
+    {"id":"i1","type":"info","timestamp":"2026-09-09T12:00:02Z","content":"Session saved"},
+    {"id":"x1","type":"custom","content":{"event":"retained"}}
+  ]
+}

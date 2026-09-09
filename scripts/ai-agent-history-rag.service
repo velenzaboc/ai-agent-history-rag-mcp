@@ -1,0 +1,26 @@
+# Native systemd user-unit reference. install-systemd.sh writes the concrete
+# absolute paths and owner-only EnvironmentFile required for a deployment.
+[Unit]
+Description=AI Agent History RAG native daemon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/ai-agent-history-rag/history-ragd.env
+ExecStart=%h/path/to/history-ragd supervise --config %h/.config/ai-agent-history-rag/history-ragd.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

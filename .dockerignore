@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+docs/_build/
+
+# Local development
+*.log
+*.pid
+.env
+.env.local
+.env.*.local
+
+# Data directories (don't include local data in image)
+data/
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+tests/
+scripts/
+*.md
+!README.md
+LICENSE
