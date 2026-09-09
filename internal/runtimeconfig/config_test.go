@@ -28,7 +28,7 @@ func validProductionEnvironment() map[string]string {
 	}
 }
 
-func TestLoadProductionRequiresExactRuntimeShapeAndKeylessIdentity(t *testing.T) {
+func TestLoadProductionRequiresExactRuntimeShapeAndIdentity(t *testing.T) {
 	env := validProductionEnvironment()
 	config, err := LoadProduction(func(key string) string { return env[key] })
 	if err != nil {

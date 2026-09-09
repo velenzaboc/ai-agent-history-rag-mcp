@@ -71,9 +71,6 @@ func TestImpersonatedCarrierRejectsNestedExportableKeyAndAuthorityDrift(t *testi
 		mutate func(string) string
 		want   string
 	}{
-		{name: "service account source", mutate: func(raw string) string {
-			return strings.Replace(raw, `"type": "authorized_user"`, `"type": "service_account"`, 1)
-		}, want: `source_credentials.type must be "authorized_user"`},
 		{name: "nested private key", mutate: func(raw string) string {
 			return strings.Replace(raw, `"type": "authorized_user"`, `"type": "authorized_user", "private_key": "forbidden"`, 1)
 		}, want: "private_key"},
@@ -112,6 +109,80 @@ func TestImpersonatedCarrierRejectsNestedExportableKeyAndAuthorityDrift(t *testi
 	}
 }
 
+func deviceSourceCarrier(identity string) string {
+	return fmt.Sprintf(`{
+  "type": "impersonated_service_account",
+  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken",
+  "delegates": [],
+  "source_credentials": {
+    "type": "service_account",
+    "project_id": "fixture-project",
+    "private_key_id": "fixture-key-id",
+    "private_key": "fixture-private-key-material",
+    "client_email": "device-source@fixture-project.iam.gserviceaccount.com",
+    "client_id": "100000000000000000000",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/device-source%%40fixture-project.iam.gserviceaccount.com",
+    "universe_domain": "googleapis.com"
+  },
+  "scopes": ["%s"],
+  "quota_project_id": "fixture-project"
+}`, identity, cloudPlatformScopeFixture)
+}
+
+func TestImpersonatedCarrierAcceptsDeviceServiceAccountSource(t *testing.T) {
+	if err := validateImpersonatedConfiguration([]byte(deviceSourceCarrier(testIdentity)), testIdentity); err != nil {
+		t.Fatalf("device-sourced carrier rejected: %v", err)
+	}
+}
+
+func TestImpersonatedCarrierKeepsDeviceKeyScopedToSource(t *testing.T) {
+	carrier := deviceSourceCarrier(testIdentity)
+	for _, tt := range []struct {
+		name   string
+		mutate func(string) string
+		want   string
+	}{
+		{
+			name: "top-level private key",
+			mutate: func(raw string) string {
+				return strings.Replace(raw, `"delegates": [],`, `"delegates": [], "private_key": "leaked",`, 1)
+			},
+			want: "not allowed",
+		},
+		{
+			name: "unknown source field",
+			mutate: func(raw string) string {
+				return strings.Replace(raw, `"type": "service_account",`, `"type": "service_account", "unexpected": true,`, 1)
+			},
+			want: "not allowed",
+		},
+		{
+			name: "non-canonical source identity",
+			mutate: func(raw string) string {
+				return strings.Replace(raw, `device-source@fixture-project.iam.gserviceaccount.com`, `person@example.com`, 1)
+			},
+			want: "canonical service-account email",
+		},
+		{
+			name: "redirected auth uri",
+			mutate: func(raw string) string {
+				return strings.Replace(raw, `https://accounts.google.com/o/oauth2/auth`, `https://example.invalid/auth`, 1)
+			},
+			want: "auth_uri must equal",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateImpersonatedConfiguration([]byte(tt.mutate(carrier)), testIdentity)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestTokenSourceRejectsCallerScopeExpansion(t *testing.T) {
 	clearAmbientGoogleEnvironment(t)
 	directory := t.TempDir()
@@ -119,6 +190,7 @@ func TestTokenSourceRejectsCallerScopeExpansion(t *testing.T) {
 	if err := os.WriteFile(path, []byte(validImpersonatedCarrier(testIdentity)), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	restrictTestFileAccess(t, path)
 	originalPath := defaultADCPath
 	defaultADCPath = func() (string, error) { return path, nil }
 	t.Cleanup(func() { defaultADCPath = originalPath })
@@ -254,9 +326,10 @@ func TestReadOwnerOnlyRegularFileRejectsFinalPathSymlink(t *testing.T) {
 	if err := os.WriteFile(target, []byte(`{"type":"fixture"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	restrictTestFileAccess(t, target)
 	link := filepath.Join(directory, "application_default_credentials.json")
 	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
+		t.Skipf("symbolic links are unavailable: %v", err)
 	}
 	if _, err := readOwnerOnlyRegularFile(link); err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
 		t.Fatalf("symlink error = %v", err)
@@ -270,6 +343,7 @@ func TestReadOwnerOnlyRegularFileRequiresStablePrivateBoundedInput(t *testing.T)
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	restrictTestFileAccess(t, path)
 	got, err := readOwnerOnlyRegularFile(path)
 	if err != nil || string(got) != string(payload) {
 		t.Fatalf("readOwnerOnlyRegularFile(valid) = %q, %v", got, err)
@@ -285,18 +359,14 @@ func TestReadOwnerOnlyRegularFileRequiresStablePrivateBoundedInput(t *testing.T)
 			}
 		})
 	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	loosenTestFileAccess(t, path)
 	if _, err := readOwnerOnlyRegularFile(path); err == nil {
 		t.Fatal("readOwnerOnlyRegularFile accepted group-readable carrier")
 	}
 	if err := os.WriteFile(path, make([]byte, maxCredentialConfigurationBytes+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	restrictTestFileAccess(t, path)
 	if _, err := readOwnerOnlyRegularFile(path); err == nil {
 		t.Fatal("readOwnerOnlyRegularFile accepted oversized carrier")
 	}
@@ -309,6 +379,7 @@ func TestImpersonatedTokenSourceUsesOnlyWellKnownOwnerOnlyCarrier(t *testing.T) 
 	if err := os.WriteFile(path, []byte(validImpersonatedCarrier(testIdentity)), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	restrictTestFileAccess(t, path)
 	originalPath := defaultADCPath
 	defaultADCPath = func() (string, error) { return path, nil }
 	t.Cleanup(func() { defaultADCPath = originalPath })

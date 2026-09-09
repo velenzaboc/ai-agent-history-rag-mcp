@@ -1,7 +1,8 @@
 // Package gcpauth resolves one process-level, identity-bound Google credential
 // selector. The local arm validates the well-known impersonated ADC carrier;
 // the hosted arm proves the attached metadata identity. There is deliberately
-// no arbitrary credential-file or service-account-key arm.
+// no arbitrary credential-file arm; a device key is accepted only as the
+// constrained nested source of the impersonated carrier.
 package gcpauth
 
 import (
@@ -381,7 +382,18 @@ func validateImpersonatedConfiguration(data []byte, identity string) error {
 	if err := validateObjectKeys(raw, "top-level", []string{"type", "service_account_impersonation_url", "delegates", "source_credentials", "scopes", "quota_project_id"}); err != nil {
 		return err
 	}
-	if err := rejectForbiddenCredentialFields(raw); err != nil {
+	// The device-bound service-account source is the one narrowly scoped place
+	// where the carrier may contain private key material. Keep the recursive
+	// ban on every other field so a key cannot be smuggled into delegates,
+	// scopes, quota metadata, or a future top-level extension.
+	forbiddenScan := make(map[string]any, len(raw))
+	for key, value := range raw {
+		if key == "source_credentials" {
+			continue
+		}
+		forbiddenScan[key] = value
+	}
+	if err := rejectForbiddenCredentialFields(forbiddenScan); err != nil {
 		return err
 	}
 	if credentialType, _ := raw["type"].(string); credentialType != CredentialsProfileImpersonatedServiceAccount {
@@ -403,17 +415,44 @@ func validateImpersonatedConfiguration(data []byte, identity string) error {
 	if !ok {
 		return fmt.Errorf("source_credentials object is required")
 	}
-	if err := validateObjectKeys(source, "source_credentials", []string{"type", "client_id", "client_secret", "refresh_token", "token_uri", "rapt_token", "universe_domain", "account"}); err != nil {
-		return err
-	}
-	if sourceType, _ := source["type"].(string); sourceType != "authorized_user" {
-		return fmt.Errorf("source_credentials.type must be %q", "authorized_user")
-	}
-	for _, field := range []string{"client_id", "client_secret", "refresh_token"} {
-		value, ok := source[field].(string)
-		if !ok || strings.TrimSpace(value) == "" {
-			return fmt.Errorf("source_credentials.%s is required", field)
+	// Accept only the two Google ADC source shapes we can constrain. The
+	// authorized-user form remains supported for existing carriers; the
+	// service-account form is the device-identity path and keeps its private key
+	// confined to this exact nested object.
+	sourceType, _ := source["type"].(string)
+	switch sourceType {
+	case "authorized_user":
+		if err := validateObjectKeys(source, "source_credentials", []string{"type", "client_id", "client_secret", "refresh_token", "token_uri", "rapt_token", "universe_domain", "account"}); err != nil {
+			return err
 		}
+		for _, field := range []string{"client_id", "client_secret", "refresh_token"} {
+			value, ok := source[field].(string)
+			if !ok || strings.TrimSpace(value) == "" {
+				return fmt.Errorf("source_credentials.%s is required", field)
+			}
+		}
+	case "service_account":
+		if err := validateObjectKeys(source, "source_credentials", []string{"type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "auth_uri", "token_uri", "auth_provider_x509_cert_url", "client_x509_cert_url", "universe_domain"}); err != nil {
+			return err
+		}
+		for _, field := range []string{"client_email", "private_key_id", "private_key"} {
+			value, ok := source[field].(string)
+			if !ok || strings.TrimSpace(value) == "" {
+				return fmt.Errorf("source_credentials.%s is required", field)
+			}
+		}
+		email, _ := source["client_email"].(string)
+		if !serviceAccountEmailPattern.MatchString(email) {
+			return fmt.Errorf("source_credentials.client_email %q is not a canonical service-account email", email)
+		}
+		if authURI, exists := source["auth_uri"]; exists {
+			value, ok := authURI.(string)
+			if !ok || value != "https://accounts.google.com/o/oauth2/auth" {
+				return fmt.Errorf("source_credentials.auth_uri must equal %q when present", "https://accounts.google.com/o/oauth2/auth")
+			}
+		}
+	default:
+		return fmt.Errorf("source_credentials.type must be %q or %q", "authorized_user", "service_account")
 	}
 	if tokenURI, exists := source["token_uri"]; exists {
 		value, ok := tokenURI.(string)

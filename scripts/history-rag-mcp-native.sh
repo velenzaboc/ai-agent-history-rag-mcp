@@ -4,6 +4,7 @@ set -euo pipefail
 PROTOCOL_VERSION="2025-06-18"
 DAEMON_BASE_URL="http://127.0.0.1:4680"
 DAEMON_PSK=""
+AUTH_HEADER_FILE=""
 CURL_BIN=""
 
 contract_fail() {
@@ -41,6 +42,35 @@ secure_regular_file() {
   local label="$2"
   [[ ! -L "$path" ]] || contract_fail "$label must not be a symlink"
   [[ -f "$path" ]] || contract_fail "$label must be a regular file"
+  if [[ -n "${MSYSTEM-}" ]]; then
+    local windows_path acl_powershell
+    if command -v cygpath >/dev/null 2>&1; then
+      windows_path="$(cygpath -w -- "$path")"
+    else
+      windows_path="$path"
+    fi
+    acl_powershell="$(command -v pwsh.exe || command -v pwsh || command -v powershell.exe || true)"
+    [[ -n "$acl_powershell" ]] || contract_fail "PowerShell is required for Windows ACL validation"
+    if ! VELENZA_ACL_PATH="$windows_path" "$acl_powershell" -NoProfile -NonInteractive -Command '
+      $p = $env:VELENZA_ACL_PATH
+      $item = Get-Item -LiteralPath $p -Force -ErrorAction Stop
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { exit 11 }
+      $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
+      # Resolve the effective identity from Windows itself. The caller may
+      # deliberately run with a scrubbed environment, so USER/USERNAME is not
+      # an authority source for this check.
+      $current = "$([Environment]::UserDomainName)\$([Environment]::UserName)"
+      if (-not ($acl.Owner -ieq $current)) { exit 12 }
+      $allowed = @($current, "NT AUTHORITY\SYSTEM", "BUILTIN\Administrators")
+      foreach ($rule in @($acl.Access)) {
+        if ($rule.AccessControlType -eq "Allow" -and ($allowed -notcontains $rule.IdentityReference.Value)) { exit 13 }
+      }
+      exit 0
+    ' >/dev/null 2>&1; then
+      contract_fail "$label must have an owner-only Windows ACL"
+    fi
+    return 0
+  fi
   local mode owner
   mode="$(file_mode "$path")" || contract_fail "$label permissions cannot be inspected"
   owner="$(file_owner "$path")" || contract_fail "$label owner cannot be inspected"
@@ -50,10 +80,11 @@ secure_regular_file() {
   [[ "$owner" == "$(id -u)" ]] || contract_fail "$label must be owned by the current user"
 }
 
-contains_private_key_fields() {
+contains_private_key_fields_outside_source() {
   local adc_path="$1"
   jq -e '
-    [.. | objects | select(has("private_key") or has("private_key_id"))]
+    del(.source_credentials)
+    | [.. | objects | select(has("private_key") or has("private_key_id"))]
     | length == 0
   ' "$adc_path" >/dev/null 2>&1
 }
@@ -70,17 +101,39 @@ validate_impersonated_adc() {
   fi
   jq -e 'type == "object"' "$adc_path" >/dev/null 2>&1 || contract_fail "GOOGLE_APPLICATION_CREDENTIALS must contain a JSON object"
   [[ "$(jq -r '.type // empty' "$adc_path")" == "impersonated_service_account" ]] || contract_fail "GOOGLE_APPLICATION_CREDENTIALS must be an impersonated_service_account ADC profile"
-  contains_private_key_fields "$adc_path" || contract_fail "GOOGLE_APPLICATION_CREDENTIALS must not contain private key material"
-
   local source_type
   source_type="$(jq -r '.source_credentials.type // empty' "$adc_path")"
-  [[ "$source_type" == "authorized_user" ]] || contract_fail "impersonated ADC source_credentials must be authorized_user"
-  jq -e '
-    (.source_credentials | type == "object") and
-    (.source_credentials.client_id | type == "string" and length > 0) and
-    (.source_credentials.client_secret | type == "string" and length > 0) and
-    (.source_credentials.refresh_token | type == "string" and length > 0)
-  ' "$adc_path" >/dev/null 2>&1 || contract_fail "impersonated ADC authorized_user source is incomplete"
+  [[ "$source_type" == "authorized_user" || "$source_type" == "service_account" ]] || contract_fail "impersonated ADC source_credentials must be authorized_user or service_account"
+  contains_private_key_fields_outside_source "$adc_path" || contract_fail "GOOGLE_APPLICATION_CREDENTIALS must not contain private key material outside source_credentials"
+  case "$source_type" in
+    authorized_user)
+      jq -e '
+        (.source_credentials | type == "object") and
+        (.source_credentials.client_id | type == "string" and length > 0) and
+        (.source_credentials.client_secret | type == "string" and length > 0) and
+        (.source_credentials.refresh_token | type == "string" and length > 0) and
+        ([.source_credentials | keys[]] | all(. as $key | ["type", "client_id", "client_secret", "refresh_token", "token_uri", "rapt_token", "universe_domain", "account"] | index($key) != null))
+      ' "$adc_path" >/dev/null 2>&1 || contract_fail "impersonated ADC authorized_user source is incomplete or contains an unsupported field"
+      ;;
+    service_account)
+      jq -e '
+        (.source_credentials | type == "object") and
+        (.source_credentials.client_email | type == "string" and length > 0) and
+        (.source_credentials.private_key_id | type == "string" and length > 0) and
+        (.source_credentials.private_key | type == "string" and length > 0) and
+        ([.source_credentials | keys[]] | all(. as $key | ["type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "auth_uri", "token_uri", "auth_provider_x509_cert_url", "client_x509_cert_url", "universe_domain"] | index($key) != null))
+      ' "$adc_path" >/dev/null 2>&1 || contract_fail "impersonated ADC service_account source is incomplete or contains an unsupported field"
+      local source_email auth_uri token_uri universe_domain
+      source_email="$(jq -r '.source_credentials.client_email // empty' "$adc_path")"
+      [[ "$source_email" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$ ]] || contract_fail "impersonated ADC service_account client_email is not canonical"
+      auth_uri="$(jq -r '.source_credentials.auth_uri // empty' "$adc_path")"
+      [[ -z "$auth_uri" || "$auth_uri" == "https://accounts.google.com/o/oauth2/auth" ]] || contract_fail "impersonated ADC service_account auth_uri is not canonical"
+      token_uri="$(jq -r '.source_credentials.token_uri // empty' "$adc_path")"
+      [[ -z "$token_uri" || "$token_uri" == "https://oauth2.googleapis.com/token" ]] || contract_fail "impersonated ADC service_account token_uri is not canonical"
+      universe_domain="$(jq -r '.source_credentials.universe_domain // empty' "$adc_path")"
+      [[ -z "$universe_domain" || "$universe_domain" == "googleapis.com" ]] || contract_fail "impersonated ADC service_account universe_domain is not canonical"
+      ;;
+  esac
   jq -e '(.delegates == null) or (.delegates == [])' "$adc_path" >/dev/null 2>&1 || contract_fail "impersonated ADC delegates must be absent"
 
   local expected_url actual_url
@@ -168,6 +221,19 @@ load_daemon_psk() {
   fi
   [[ -n "$DAEMON_PSK" ]] || contract_fail "daemon authentication is enabled but no active PSK is available"
   [[ "$DAEMON_PSK" != *$'\n'* && "$DAEMON_PSK" != *$'\r'* ]] || contract_fail "daemon PSK contains an invalid control character"
+  if [[ -n "${MSYSTEM-}" ]]; then
+    AUTH_HEADER_FILE="$(mktemp "${TMPDIR:-/tmp}/history-rag-auth.XXXXXX")" || contract_fail "temporary auth header cannot be created"
+    printf 'Authorization: Bearer %s\n' "$DAEMON_PSK" >"$AUTH_HEADER_FILE"
+    chmod 600 "$AUTH_HEADER_FILE"
+    local auth_header_windows_path auth_header_owner acl_powershell
+    auth_header_windows_path="$(cygpath -w -- "$AUTH_HEADER_FILE" 2>/dev/null || printf '%s' "$AUTH_HEADER_FILE")"
+    acl_powershell="$(command -v pwsh.exe || command -v pwsh || command -v powershell.exe || true)"
+    [[ -n "$acl_powershell" ]] || contract_fail "PowerShell is required for temporary auth header ACL validation"
+    auth_header_owner="$("$acl_powershell" -NoProfile -NonInteractive -Command '[Environment]::UserDomainName + "\\" + [Environment]::UserName' | tr -d '\r\n'):(F)"
+    icacls.exe "$auth_header_windows_path" /inheritance:r /grant:r "$auth_header_owner" >/dev/null 2>&1 || contract_fail "temporary auth header ACL could not be restricted"
+    secure_regular_file "$AUTH_HEADER_FILE" "temporary daemon authorization header"
+    trap '[[ -n "${AUTH_HEADER_FILE-}" ]] && rm -f -- "$AUTH_HEADER_FILE"' EXIT
+  fi
 }
 
 daemon_request() {
@@ -187,7 +253,11 @@ daemon_request() {
   )
   local auth_args=()
   if [[ -n "$DAEMON_PSK" ]]; then
-    auth_args=(--header @/dev/fd/3)
+    if [[ -n "$AUTH_HEADER_FILE" ]]; then
+      auth_args=(--header "@$AUTH_HEADER_FILE")
+    else
+      auth_args=(--header @/dev/fd/3)
+    fi
   fi
 
   if [[ "$method" == "POST" ]]; then

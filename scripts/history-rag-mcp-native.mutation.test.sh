@@ -31,14 +31,14 @@ expect_killed() {
 # shellcheck disable=SC2016
 expect_killed \
   "nested source type" \
-  '[[ "$source_type" == "authorized_user" ]] || contract_fail "impersonated ADC source_credentials must be authorized_user"' \
+  '[[ "$source_type" == "authorized_user" || "$source_type" == "service_account" ]] || contract_fail "impersonated ADC source_credentials must be authorized_user or service_account"' \
   ': # MUTANT accepts arbitrary nested source type'
 
 # shellcheck disable=SC2016
 expect_killed \
   "recursive private marker" \
-  'contains_private_key_fields "$adc_path" || contract_fail "GOOGLE_APPLICATION_CREDENTIALS must not contain private key material"' \
-  ': # MUTANT accepts recursive private-key fields'
+  'contains_private_key_fields_outside_source "$adc_path" || contract_fail "GOOGLE_APPLICATION_CREDENTIALS must not contain private key material outside source_credentials"' \
+  ': # MUTANT accepts private-key fields outside the source'
 
 expect_killed \
   "gate before network" \

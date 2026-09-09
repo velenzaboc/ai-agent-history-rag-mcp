@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -30,12 +31,19 @@ func (f *failingMetadataClient) GetWithContext(context.Context, string) (string,
 func TestSelectorCoversDefaultPathAndEarlyValidationBoundaries(t *testing.T) {
 	clearAmbientGoogleEnvironment(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("APPDATA", home)
+	} else {
+		t.Setenv("HOME", home)
+	}
 	path, err := defaultADCPath()
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := filepath.Join(home, ".config", "gcloud", "application_default_credentials.json")
+	if runtime.GOOS == "windows" {
+		want = filepath.Join(home, "gcloud", "application_default_credentials.json")
+	}
 	if path != want {
 		t.Fatalf("default ADC path = %q, want %q", path, want)
 	}
@@ -126,6 +134,7 @@ func TestImpersonatedTokenSourceFailureAndDetachedContextBoundaries(t *testing.T
 	if err := os.WriteFile(path, []byte(`{"type":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	restrictTestFileAccess(t, path)
 	defaultADCPath = func() (string, error) { return path, nil }
 	if _, err := selector.TokenSourceForRequest(context.Background(), CloudPlatformScope); err == nil || !strings.Contains(err.Error(), "validate impersonated ADC carrier") {
 		t.Fatalf("invalid carrier error = %v", err)
@@ -134,6 +143,7 @@ func TestImpersonatedTokenSourceFailureAndDetachedContextBoundaries(t *testing.T
 	if err := os.WriteFile(path, []byte(validImpersonatedCarrier(testIdentity)), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	restrictTestFileAccess(t, path)
 	client := &http.Client{}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, client)
 	if source, err := selector.TokenSource(ctx, CloudPlatformScope); err != nil || source == nil {

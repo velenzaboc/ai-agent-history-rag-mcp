@@ -1,7 +1,8 @@
 // Package runtimeconfig owns the native History-RAG production process shape.
 // The contract is deliberately closed: production is Spanner + Vertex on the
-// established loopback status endpoint and one explicit keyless credential
-// selector. Deployment identities remain required inputs, never source defaults.
+// established loopback status endpoint and one explicit identity-bound
+// credential selector. Deployment identities remain required inputs, never
+// source defaults.
 package runtimeconfig
 
 import (
