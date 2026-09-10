@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	historyauth "github.com/no13productions/ai-agent-history-rag-mcp/internal/history/auth"
+	historyauth "github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/auth"
 )
 
 const (

@@ -4,10 +4,10 @@ package clientregistry
 import (
 	"errors"
 	"fmt"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/apiclient"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/cursor"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/uploadqueue"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/watch"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/apiclient"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/cursor"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/uploadqueue"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/watch"
 	"path/filepath"
 	"sort"
 )
