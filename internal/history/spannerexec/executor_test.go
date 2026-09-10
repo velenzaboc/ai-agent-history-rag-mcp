@@ -9,8 +9,8 @@ import (
 
 	"cloud.google.com/go/spanner"
 	sppb "cloud.google.com/go/spanner/apiv1/spannerpb"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/gcpauth"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/store"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/gcpauth"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/store"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"

@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/gcpauth"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/gcpauth"
 )
 
 const (

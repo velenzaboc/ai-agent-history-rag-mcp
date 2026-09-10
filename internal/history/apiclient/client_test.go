@@ -3,7 +3,7 @@ package apiclient
 import (
 	"context"
 	"errors"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/ingest"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/ingest"
 	"io"
 	"net/http"
 	"net/http/httptest"

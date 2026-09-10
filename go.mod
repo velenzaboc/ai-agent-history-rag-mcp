@@ -1,4 +1,4 @@
-module github.com/no13productions/ai-agent-history-rag-mcp
+module github.com/velenzaboc/ai-agent-history-rag-mcp
 
 go 1.27.0
 
