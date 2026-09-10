@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/store"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/store"
 	"io"
 	"path/filepath"
 	"regexp"

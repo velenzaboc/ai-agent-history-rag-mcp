@@ -14,7 +14,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/durable"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/durable"
 )
 
 const (

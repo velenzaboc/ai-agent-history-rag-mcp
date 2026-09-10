@@ -3,7 +3,7 @@ package statusmetrics
 import (
 	"context"
 	"errors"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/store"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/store"
 	"sync"
 	"testing"
 	"time"
