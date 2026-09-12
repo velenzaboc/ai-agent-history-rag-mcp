@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "listen": "127.0.0.1:4780",
+  "base_path": "/",
+  "request_timeout_seconds": 120,
+  "shutdown_timeout_seconds": 15,
+  "access": {
+    "mode": "none",
+    "bearer_env": ""
+  },
+  "fleet": {
+    "mode": "mcp_http",
+    "endpoint": "http://127.0.0.1:8790/",
+    "project_id": "replace-me",
+    "snapshot_tool": "task_graph_project_snapshot",
+    "tasks_tool": "task_graph_tasks",
+    "scope": "project",
+    "root_task_id": "",
+    "limit": 1000,
+    "active_limit": 2000,
+    "max_response_bytes": 134217728
+  },
+  "history": {
+    "mode": "legacy_http",
+    "endpoint": "http://127.0.0.1:4680",
+    "status_path": "/status?detail=basic",
+    "sessions_path": "/api/sessions",
+    "search_path": "/api/search",
+    "files_path": "/api/search/files",
+    "auth": {
+      "mode": "bearer_env",
+      "bearer_env": "WORK_RECOVERY_HISTORY_TOKEN"
+    },
+    "recent_limit": 20,
+    "search_limit": 50,
+    "session_cache_limit": 500,
+    "probe_limit": 0,
+    "probe_concurrency": 3,
+    "max_response_bytes": 33554432,
+    "project_filter": "",
+    "search": {
+      "use_hybrid": true,
+      "enable_analysis": false,
+      "enable_synthesis": false,
+      "include_debug": false
+    }
+  },
+  "matching": {
+    "session_id_pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+    "path_rewrites": [
+      {
+        "from": "C:/workspace",
+        "to": "/workspace"
+      },
+      {
+        "from": "/Users/example/workspace",
+        "to": "/workspace"
+      }
+    ],
+    "weights": {
+      "exact_session": 100,
+      "exact_path": 85,
+      "project_name": 40,
+      "title_token": 15
+    },
+    "accept_score": 70,
+    "suggest_score": 30
+  },
+  "classification": {
+    "stale_after_hours": 168,
+    "abandoned_after_hours": 720,
+    "rules": [
+      {
+        "id": "orphan_session",
+        "label": "Unlinked history",
+        "severity": "medium",
+        "color": "#F1B969"
+      },
+      {
+        "id": "abandoned_session",
+        "label": "Abandoned history",
+        "severity": "high",
+        "color": "#FF7D70"
+      },
+      {
+        "id": "stale_thread",
+        "label": "Stale active thread",
+        "severity": "high",
+        "color": "#FF7D70"
+      },
+      {
+        "id": "missing_history",
+        "label": "Missing session history",
+        "severity": "high",
+        "color": "#FF7D70"
+      },
+      {
+        "id": "ambiguous_binding",
+        "label": "Ambiguous task binding",
+        "severity": "medium",
+        "color": "#F1B969"
+      },
+      {
+        "id": "unlinked_task",
+        "label": "Active task without work link",
+        "severity": "low",
+        "color": "#7EA7FF"
+      }
+    ]
+  },
+  "status": {
+    "groups": [
+      {
+        "id": "backlog",
+        "label": "Backlog",
+        "color": "#7E899B",
+        "statuses": ["not_started", "planned", "pending"]
+      },
+      {
+        "id": "active",
+        "label": "In motion",
+        "color": "#65D6B5",
+        "statuses": ["in_progress", "in_review"]
+      },
+      {
+        "id": "blocked",
+        "label": "Blocked / gap",
+        "color": "#F1B969",
+        "statuses": ["blocked", "gap"]
+      },
+      {
+        "id": "done",
+        "label": "Complete",
+        "color": "#7EA7FF",
+        "statuses": ["done", "complete", "completed", "resolved"]
+      },
+      {
+        "id": "dormant",
+        "label": "Dormant",
+        "color": "#596274",
+        "statuses": ["archived", "cancelled"]
+      }
+    ],
+    "active_group_ids": ["active", "blocked"],
+    "terminal_group_ids": ["done", "dormant"],
+    "milestone_levels": ["goal", "program", "epic", "milestone"]
+  },
+  "view": {
+    "title": "Work Recovery Console",
+    "eyebrow": "Internal operations",
+    "subtitle": "Live task state joined to durable AI history evidence. Read-only by design.",
+    "refresh_seconds": 60,
+    "cache_seconds": 15,
+    "max_api_response_bytes": 67108864,
+    "max_lane_cards": 240,
+    "max_graph_nodes": 160,
+    "summary_preview_characters": 520,
+    "labels": {
+      "inbox": "Recovery inbox",
+      "lanes": "Work lanes",
+      "tasks": "Task inventory",
+      "milestones": "Milestones",
+      "graph": "Dependency graph",
+      "history_search": "AI history search",
+      "copy_resume": "Copy restart prompt",
+      "sources": "Live sources"
+    },
+    "theme": {
+      "background": "#090C11",
+      "surface": "#121721",
+      "surface_alt": "#18202D",
+      "text": "#F2F5FA",
+      "muted": "#91A0B5",
+      "accent": "#6DE1C0",
+      "accent_alt": "#7EA7FF",
+      "danger": "#FF7D70",
+      "warning": "#F1B969",
+      "success": "#65D6B5"
+    }
+  }
+}

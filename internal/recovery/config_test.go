@@ -21,6 +21,16 @@ func TestLoadConfigAcceptsClosedExplicitConfiguration(t *testing.T) {
 	}
 }
 
+func TestExampleConfigStaysLoadable(t *testing.T) {
+	path, err := filepath.Abs(filepath.Join("..", "..", "configs", "work-recovery-console.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err != nil {
+		t.Fatalf("example configuration is invalid: %v", err)
+	}
+}
+
 func TestLoadConfigRejectsUnknownAndDuplicateFields(t *testing.T) {
 	for name, payload := range map[string]string{
 		"unknown":   strings.Replace(validConfigJSON(), `"listen":`, `"surprise":true,"listen":`, 1),

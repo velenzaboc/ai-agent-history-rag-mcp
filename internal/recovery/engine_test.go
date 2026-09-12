@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,32 @@ func TestResumePacketOrdersHistoryBeforeGraphContext(t *testing.T) {
 	}
 }
 
+func TestResumePacketUsesDashboardSessionCache(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{snapshot: FleetSnapshot{ProjectID: "project-a", Tasks: []Task{{TaskID: "T-1", Title: "Task one", Status: "in_progress", UpdatedAt: now}}}}
+	calls := 0
+	history := stubHistory{
+		recent:       HistoryBatch{Sessions: []SessionSummary{{SessionID: "s-1", Summary: "cached history anchor", Timestamp: now}}},
+		sessionErr:   errors.New("exact session endpoint unavailable"),
+		sessionCalls: &calls,
+	}
+	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Dashboard(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := service.ResumePacket(context.Background(), "T-1", "s-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || !strings.Contains(packet.Text, "cached history anchor") {
+		t.Fatalf("resume packet bypassed the session cache: calls=%d packet=%q", calls, packet.Text)
+	}
+}
+
 func hasFinding(findings []Finding, kind, taskID, sessionID string) bool {
 	for _, finding := range findings {
 		if finding.Kind == kind && finding.TaskID == taskID && finding.SessionID == sessionID {
@@ -95,14 +122,22 @@ type stubFleet struct {
 func (s stubFleet) Snapshot(context.Context) (FleetSnapshot, error) { return s.snapshot, s.err }
 
 type stubHistory struct {
-	recent  HistoryBatch
-	session SessionSummary
-	search  HistoryBatch
-	err     error
+	recent       HistoryBatch
+	session      SessionSummary
+	search       HistoryBatch
+	err          error
+	sessionErr   error
+	sessionCalls *int
 }
 
 func (s stubHistory) Recent(context.Context) (HistoryBatch, error) { return s.recent, s.err }
 func (s stubHistory) Session(context.Context, string) (SessionSummary, error) {
+	if s.sessionCalls != nil {
+		*s.sessionCalls++
+	}
+	if s.sessionErr != nil {
+		return SessionSummary{}, s.sessionErr
+	}
 	return s.session, s.err
 }
 func (s stubHistory) Search(context.Context, HistorySearch) (HistoryBatch, error) {
