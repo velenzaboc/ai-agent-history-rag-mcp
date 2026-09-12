@@ -1,0 +1,391 @@
+package recovery
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+var ErrSessionNotFound = errors.New("session history was not returned")
+
+type FleetSource interface {
+	Snapshot(context.Context) (FleetSnapshot, error)
+}
+
+type HistorySource interface {
+	Recent(context.Context) (HistoryBatch, error)
+	Session(context.Context, string) (SessionSummary, error)
+	Search(context.Context, HistorySearch) (HistoryBatch, error)
+	Status(context.Context) (SourceStatus, error)
+}
+
+type MCPFleetClient struct {
+	config FleetConfig
+	client *http.Client
+	nextID atomic.Int64
+}
+
+func NewMCPFleetClient(config FleetConfig, timeout time.Duration) (*MCPFleetClient, error) {
+	if err := config.validate(); err != nil {
+		return nil, fmt.Errorf("fleet client config: %w", err)
+	}
+	if timeout <= 0 {
+		return nil, errors.New("fleet client timeout must be positive")
+	}
+	return &MCPFleetClient{config: config, client: boundedHTTPClient(timeout)}, nil
+}
+
+func (client *MCPFleetClient) Snapshot(ctx context.Context) (FleetSnapshot, error) {
+	arguments := map[string]any{
+		"project_id": client.config.ProjectID,
+		"scope":      client.config.Scope,
+		"limit":      client.config.Limit,
+	}
+	if client.config.RootTaskID != "" {
+		arguments["root_task_id"] = client.config.RootTaskID
+	}
+	requestBody := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      client.nextID.Add(1),
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      client.config.SnapshotTool,
+			"arguments": arguments,
+		},
+	}
+	payload, err := json.Marshal(requestBody)
+	if err != nil {
+		return FleetSnapshot{}, fmt.Errorf("encode fleet request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.config.Endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return FleetSnapshot{}, fmt.Errorf("construct fleet request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	response, err := client.client.Do(request)
+	if err != nil {
+		return FleetSnapshot{}, fmt.Errorf("fleet request: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := readBounded(response.Body, client.config.MaxResponseBytes)
+	if err != nil {
+		return FleetSnapshot{}, fmt.Errorf("read fleet response: %w", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return FleetSnapshot{}, fmt.Errorf("fleet response status %d", response.StatusCode)
+	}
+	rpcPayload, err := streamableJSON(body, response.Header.Get("Content-Type"))
+	if err != nil {
+		return FleetSnapshot{}, fmt.Errorf("decode fleet transport: %w", err)
+	}
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Result struct {
+			StructuredContent json.RawMessage `json:"structuredContent"`
+			Content           []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rpcPayload, &envelope); err != nil {
+		return FleetSnapshot{}, fmt.Errorf("decode fleet RPC: %w", err)
+	}
+	if envelope.Error != nil {
+		return FleetSnapshot{}, fmt.Errorf("fleet RPC %d: %s", envelope.Error.Code, envelope.Error.Message)
+	}
+	if envelope.Result.IsError {
+		return FleetSnapshot{}, errors.New("fleet tool returned an error")
+	}
+	structured := envelope.Result.StructuredContent
+	if len(structured) == 0 {
+		for _, item := range envelope.Result.Content {
+			if item.Type == "text" && json.Valid([]byte(item.Text)) {
+				structured = []byte(item.Text)
+				break
+			}
+		}
+	}
+	if len(structured) == 0 {
+		return FleetSnapshot{}, errors.New("fleet response has no structured content")
+	}
+	var snapshot FleetSnapshot
+	if err := json.Unmarshal(structured, &snapshot); err != nil {
+		return FleetSnapshot{}, fmt.Errorf("decode fleet snapshot: %w", err)
+	}
+	if snapshot.ProjectID != client.config.ProjectID {
+		return FleetSnapshot{}, fmt.Errorf("fleet snapshot project %q does not match configured project", snapshot.ProjectID)
+	}
+	return snapshot, nil
+}
+
+type LegacyHistoryClient struct {
+	config HistoryConfig
+	client *http.Client
+	bearer string
+}
+
+func NewLegacyHistoryClient(config HistoryConfig, timeout time.Duration) (*LegacyHistoryClient, error) {
+	if err := config.validate(); err != nil {
+		return nil, fmt.Errorf("history client config: %w", err)
+	}
+	if timeout <= 0 {
+		return nil, errors.New("history client timeout must be positive")
+	}
+	bearer := ""
+	if config.Auth.Mode == "bearer_env" {
+		bearer = strings.TrimSpace(os.Getenv(config.Auth.BearerEnv))
+		if bearer == "" {
+			return nil, errors.New("history bearer credential is unavailable")
+		}
+		if strings.ContainsAny(bearer, "\r\n") || len(bearer) > 16<<10 {
+			return nil, errors.New("history bearer credential is invalid")
+		}
+	}
+	return &LegacyHistoryClient{config: config, client: boundedHTTPClient(timeout), bearer: bearer}, nil
+}
+
+func (client *LegacyHistoryClient) Recent(ctx context.Context) (HistoryBatch, error) {
+	request := map[string]any{"session_id": nil, "project_filter": nullableString(client.config.ProjectFilter), "count": client.config.RecentLimit}
+	return client.sessionRequest(ctx, request, client.config.RecentLimit)
+}
+
+func (client *LegacyHistoryClient) Session(ctx context.Context, sessionID string) (SessionSummary, error) {
+	if strings.TrimSpace(sessionID) == "" || len(sessionID) > 512 {
+		return SessionSummary{}, errors.New("session id is invalid")
+	}
+	request := map[string]any{"session_id": sessionID, "project_filter": nullableString(client.config.ProjectFilter), "count": 1}
+	batch, err := client.sessionRequest(ctx, request, 1)
+	if err != nil {
+		return SessionSummary{}, err
+	}
+	if len(batch.Sessions) == 0 {
+		return SessionSummary{}, ErrSessionNotFound
+	}
+	return batch.Sessions[0], nil
+}
+
+func (client *LegacyHistoryClient) sessionRequest(ctx context.Context, request map[string]any, requested int) (HistoryBatch, error) {
+	var response historyResponse
+	if err := client.doJSON(ctx, http.MethodPost, client.config.SessionsPath, request, &response); err != nil {
+		return HistoryBatch{}, err
+	}
+	return normalizeHistoryResponse(response, requested), nil
+}
+
+func (client *LegacyHistoryClient) Search(ctx context.Context, search HistorySearch) (HistoryBatch, error) {
+	search.Query = strings.TrimSpace(search.Query)
+	if search.Query == "" && search.FilePath == "" {
+		return HistoryBatch{}, errors.New("history search query or file path is required")
+	}
+	if len(search.Query) > 10000 || len(search.FilePath) > 10000 {
+		return HistoryBatch{}, errors.New("history search input is too large")
+	}
+	limit := search.Limit
+	if limit <= 0 || limit > client.config.SearchLimit {
+		limit = client.config.SearchLimit
+	}
+	projectFilter := search.ProjectFilter
+	if projectFilter == "" {
+		projectFilter = client.config.ProjectFilter
+	}
+	request := map[string]any{
+		"query":          nullableString(search.Query),
+		"project_filter": nullableString(projectFilter),
+		"date_from":      nullableString(search.DateFrom),
+		"date_to":        nullableString(search.DateTo),
+		"limit":          limit,
+	}
+	requestPath := client.config.SearchPath
+	if search.Files {
+		requestPath = client.config.FilesPath
+		request["file_path"] = nullableString(search.FilePath)
+		request["operation_filter"] = nullableString(search.Operation)
+	} else {
+		request["use_hybrid"] = client.config.Search.UseHybrid
+		request["enable_analysis"] = client.config.Search.EnableAnalysis
+		request["enable_synthesis"] = client.config.Search.EnableSynthesis
+		request["include_debug"] = client.config.Search.IncludeDebug
+	}
+	var response historyResponse
+	if err := client.doJSON(ctx, http.MethodPost, requestPath, request, &response); err != nil {
+		return HistoryBatch{}, err
+	}
+	return normalizeHistoryResponse(response, limit), nil
+}
+
+func (client *LegacyHistoryClient) Status(ctx context.Context) (SourceStatus, error) {
+	var response map[string]any
+	err := client.doJSON(ctx, http.MethodGet, client.config.StatusPath, nil, &response)
+	status := SourceStatus{Name: "history", Healthy: err == nil, ObservedAt: time.Now().UTC()}
+	if err != nil {
+		status.Error = err.Error()
+		return status, err
+	}
+	status.Detail = response
+	return status, nil
+}
+
+func (client *LegacyHistoryClient) doJSON(ctx context.Context, method, requestPath string, input, output any) error {
+	var body io.Reader
+	if input != nil {
+		payload, err := json.Marshal(input)
+		if err != nil {
+			return fmt.Errorf("encode history request: %w", err)
+		}
+		body = bytes.NewReader(payload)
+	}
+	endpoint, err := joinEndpoint(client.config.Endpoint, requestPath)
+	if err != nil {
+		return fmt.Errorf("construct history endpoint: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return fmt.Errorf("construct history request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	if input != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if client.bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+client.bearer)
+	}
+	response, err := client.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("history request: %w", err)
+	}
+	defer response.Body.Close()
+	payload, err := readBounded(response.Body, client.config.MaxResponseBytes)
+	if err != nil {
+		return fmt.Errorf("read history response: %w", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return fmt.Errorf("history response status %d", response.StatusCode)
+	}
+	if err := json.Unmarshal(payload, output); err != nil {
+		return fmt.Errorf("decode history response: %w", err)
+	}
+	return nil
+}
+
+type historyResponse struct {
+	Summaries []historyItem `json:"summaries"`
+	Results   []historyItem `json:"results"`
+	Count     int           `json:"count"`
+	Error     any           `json:"error"`
+}
+
+type historyItem struct {
+	ID          string  `json:"id"`
+	Content     string  `json:"content"`
+	ChunkType   string  `json:"chunk_type"`
+	SessionID   string  `json:"session_id"`
+	ProjectPath string  `json:"project_path"`
+	ProjectName string  `json:"project_name"`
+	Timestamp   string  `json:"timestamp"`
+	FilePath    string  `json:"file_path"`
+	Operation   string  `json:"operation"`
+	MachineID   string  `json:"machine_id"`
+	Score       float64 `json:"score"`
+}
+
+func normalizeHistoryResponse(response historyResponse, requested int) HistoryBatch {
+	items := response.Summaries
+	if len(items) == 0 {
+		items = response.Results
+	}
+	sessions := make([]SessionSummary, 0, len(items))
+	for _, item := range items {
+		sessions = append(sessions, SessionSummary{
+			ChunkID: item.ID, SessionID: item.SessionID, Summary: item.Content, ChunkType: item.ChunkType,
+			ProjectPath: item.ProjectPath, ProjectName: item.ProjectName, Timestamp: parseTimestamp(item.Timestamp),
+			FilePath: item.FilePath, Operation: item.Operation, MachineID: item.MachineID, Score: item.Score,
+		})
+	}
+	return HistoryBatch{Sessions: sessions, Requested: requested, Returned: len(sessions), Partial: len(sessions) >= requested}
+}
+
+func boundedHTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableCompression = false
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return errors.New("redirects are disabled")
+		},
+	}
+}
+
+func readBounded(reader io.Reader, limit int64) ([]byte, error) {
+	payload, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > limit {
+		return nil, errors.New("response exceeds configured size limit")
+	}
+	return payload, nil
+}
+
+func streamableJSON(payload []byte, contentType string) ([]byte, error) {
+	if !strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		if !json.Valid(payload) {
+			return nil, errors.New("response is not valid JSON")
+		}
+		return payload, nil
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(payload))
+	buffer := make([]byte, 64<<10)
+	scanner.Buffer(buffer, len(payload)+1)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if json.Valid([]byte(data)) {
+			return []byte(data), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("event stream contains no JSON message")
+}
+
+func joinEndpoint(base, requestPath string) (string, error) {
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	pathURL, err := url.Parse(requestPath)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + pathURL.Path
+	parsed.RawQuery = pathURL.RawQuery
+	return parsed.String(), nil
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
