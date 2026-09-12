@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	historyauth "github.com/no13productions/ai-agent-history-rag-mcp/internal/history/auth"
+	historyauth "github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/auth"
 )
 
 type fakeVerifier struct{ key string }

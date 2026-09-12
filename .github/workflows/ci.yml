@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # This repository produces a REQUIRED context on main. A merge queue gates each
+  # speculative merge commit by running the required contexts against the
+  # `gh-readonly-queue/*` ref, so WITHOUT this trigger the check never reports
+  # there and every queue entry hangs until the timeout.
+  #
+  # Landing this BEFORE the queue is enabled is what MERGE_PROTOCOL.md section 3.1
+  # requires: the trigger is inert until a queue exists, so this change is safe on
+  # its own and cannot strand a merge.
+  merge_group:
 
 permissions:
   contents: read
@@ -28,22 +37,15 @@ jobs:
         with:
           go-version: "1.27.x"
 
-      - name: Test with per-package coverage floor
+      # The gate's own controls run FIRST, so a PR that weakens the gate fails
+      # before the gate is asked to judge the code.
+      - name: Coverage gate controls
         shell: bash
-        run: |
-          set -o pipefail
-          go test -count=1 -cover ./... | tee coverage.txt
-          awk '
-            /coverage:/ {
-              value = $5
-              sub(/%/, "", value)
-              if ((value + 0) < 85) {
-                print "coverage below 85%: " $2 " (" value "%)"
-                failed = 1
-              }
-            }
-            END { exit failed }
-          ' coverage.txt
+        run: bash scripts/go-coverage-gate.test.sh
+
+      - name: Per-package coverage floor
+        shell: bash
+        run: bash scripts/go-coverage-gate.sh
 
       - name: Vet
         run: go vet ./...
@@ -64,7 +66,7 @@ jobs:
         run: for tool in bash jq curl grep awk; do command -v "$tool"; done
 
       - name: Shell syntax
-        run: bash -n scripts/history-rag-mcp-native.sh scripts/history-rag-mcp-native.test.sh scripts/history-rag-mcp-native.mutation.test.sh scripts/docker-native.test.sh scripts/systemd-native.test.sh scripts/launchd-native.test.sh scripts/windows-native.test.sh scripts/docs-native-contract.test.sh scripts/start.sh
+        run: bash -n scripts/history-rag-mcp-native.sh scripts/history-rag-mcp-native.test.sh scripts/history-rag-mcp-native.mutation.test.sh scripts/docker-native.test.sh scripts/systemd-native.test.sh scripts/launchd-native.test.sh scripts/windows-native.test.sh scripts/docs-native-contract.test.sh scripts/start.sh scripts/go-coverage-gate.sh scripts/go-coverage-gate.test.sh
 
       - name: Native MCP security contract
         run: bash scripts/history-rag-mcp-native.test.sh

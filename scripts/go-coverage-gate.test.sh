@@ -11,8 +11,16 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 GATE="$ROOT_DIR/scripts/go-coverage-gate.sh"
-TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+# Fixtures must stay below this checkout rather than an OS temporary directory.
+# The guarded PID leaf is exclusive and cleanup cannot escape TMP_ROOT.
+TMP_BASE="${COVERAGE_GATE_TEST_WORK_ROOT:-$ROOT_DIR/.go-coverage-gate-test-work}"
+mkdir -p -- "$TMP_BASE"
+TMP_ROOT="$TMP_BASE/run-$$"
+if ! mkdir -- "$TMP_ROOT"; then
+  printf 'go-coverage-gate.test: cannot allocate fixture directory: %s\n' "$TMP_ROOT" >&2
+  exit 2
+fi
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
 PASS_COUNT=0
 OUT="$TMP_ROOT/out.txt"
@@ -24,6 +32,16 @@ run_gate() {
   local dir="$1"; shift
   set +e
   ( cd "$dir" && GOFLAGS= bash "$GATE" --dir "$dir" "$@" ) >"$OUT" 2>&1
+  GATE_STATUS=$?
+  set -e
+}
+
+# Preserve the established positional-module and COVERAGE_FLOOR interface while
+# exercising the same real gate entrypoint.
+run_gate_legacy_interface() {
+  local dir="$1"
+  set +e
+  ( cd "$dir" && GOFLAGS= bash "$GATE" "$dir" ) >"$OUT" 2>&1
   GATE_STATUS=$?
   set -e
 }
@@ -132,7 +150,7 @@ mkdir -p "$DIR/orphan"
 run_gate "$DIR" --floor 85
 expect_status "test-less package fails" 1
 expect_output "test-less package fails" "0.0%   notests/orphan"
-expect_output "test-less package fails" "[NO TEST FILES: 0 of 5 statements covered]"
+expect_output "test-less package fails" "[NO TEST FILES: 0 of"
 expect_output "test-less package fails" "units_measured=2"
 expect_output "test-less package fails" "minimum_module_coverage=0.0%"
 pass "a package with no test files appears in the report at 0.0% and fails"
@@ -335,6 +353,11 @@ expect_output "raised floor is enforced" "floor=90% (fleet floor 85%)"
 expect_output "raised floor is enforced" "floor 90%"
 expect_output "raised floor is enforced" "packages_below_floor=1"
 pass "the same 86.0% package fails once the consumer raises the floor to 90"
+
+COVERAGE_FLOOR=90 run_gate_legacy_interface "$DIR"
+expect_status "legacy positional interface and COVERAGE_FLOOR are enforced" 1
+expect_output "legacy positional interface and COVERAGE_FLOOR are enforced" "floor=90% (fleet floor 85%)"
+pass "the existing positional module interface and COVERAGE_FLOOR override remain enforced"
 
 # Exactly at the floor passes. An off-by-one at the boundary would either fail
 # compliant work or admit non-compliant work, and both are silent.

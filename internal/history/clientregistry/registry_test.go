@@ -2,8 +2,8 @@ package clientregistry
 
 import (
 	"errors"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/apiclient"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/watch"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/apiclient"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/watch"
 	"path/filepath"
 	"testing"
 	"time"

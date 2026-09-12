@@ -20,7 +20,7 @@
 set -euo pipefail
 
 FLEET_FLOOR=85
-FLOOR="$FLEET_FLOOR"
+FLOOR="${COVERAGE_FLOOR:-$FLEET_FLOOR}"
 MODULE_DIR=""
 
 while [[ $# -gt 0 ]]; do
@@ -34,7 +34,11 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       printf 'usage: go-coverage-gate.sh [--floor N] [--dir PATH]\n'; exit 0 ;;
     *)
-      printf 'go-coverage-gate: unknown argument: %s\n' "$1" >&2; exit 2 ;;
+      if [[ -z "$MODULE_DIR" ]]; then
+        MODULE_DIR="$1"; shift
+      else
+        printf 'go-coverage-gate: unknown argument: %s\n' "$1" >&2; exit 2
+      fi ;;
   esac
 done
 
@@ -66,8 +70,17 @@ for tool in go awk jq sort; do
   }
 done
 
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# Keep transient gate state inside the measured checkout (or an explicitly
+# declared build root), never in the host OS temporary directory. The PID-only
+# leaf is fail-closed on collision and is removed without touching its parent.
+WORK_ROOT="${COVERAGE_GATE_WORK_ROOT:-$PWD/.coverage-gate-work}"
+mkdir -p -- "$WORK_ROOT"
+WORK="$WORK_ROOT/run-$$"
+if ! mkdir -- "$WORK"; then
+  printf 'go-coverage-gate: cannot allocate isolated work directory: %s\n' "$WORK" >&2
+  exit 2
+fi
+trap 'rm -rf -- "$WORK"' EXIT
 
 hard_fail() {
   printf 'go-coverage-gate: HARD FAIL: %s\n' "$1" >&2

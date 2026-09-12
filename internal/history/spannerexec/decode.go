@@ -6,7 +6,7 @@ import (
 
 	"cloud.google.com/go/spanner"
 	sppb "cloud.google.com/go/spanner/apiv1/spannerpb"
-	"github.com/no13productions/ai-agent-history-rag-mcp/internal/history/store"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/store"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
