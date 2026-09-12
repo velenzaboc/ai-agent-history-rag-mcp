@@ -536,12 +536,12 @@ func (service *Service) scoreRelatedTask(root Task, rootLinks []Worklink, candid
 	if service.config.Discovery.Weights["search_hit"] > 0 {
 		reasons = append(reasons, "search_hit")
 	}
-	titleOverlap := service.relatedTokenOverlap(root.Title, candidate.Title)
+	titleOverlap := service.relatedTokenOverlap(root.Title, candidate.Title, service.config.Discovery.MaxQueryTerms)
 	if titleOverlap > 0 {
 		score += titleOverlap * service.config.Discovery.Weights["title_token_overlap"]
 		reasons = append(reasons, fmt.Sprintf("title_token_overlap:%d", titleOverlap))
 	}
-	noteOverlap := service.relatedTokenOverlap(root.Note, candidate.Note)
+	noteOverlap := service.relatedTokenOverlap(root.Note, candidate.Note, service.config.Discovery.MaxNoteOverlapTerms)
 	if noteOverlap > 0 {
 		score += noteOverlap * service.config.Discovery.Weights["note_token_overlap"]
 		reasons = append(reasons, fmt.Sprintf("note_token_overlap:%d", noteOverlap))
@@ -571,7 +571,7 @@ func (service *Service) scoreRelatedTask(root Task, rootLinks []Worklink, candid
 	return score, similarityScore, reasons, sharedArtifact
 }
 
-func (service *Service) relatedTokenOverlap(left, right string) int {
+func (service *Service) relatedTokenOverlap(left, right string, limit int) int {
 	leftTokens := make(map[string]struct{})
 	for _, token := range service.discoveryTokens(left) {
 		leftTokens[token] = struct{}{}
@@ -585,7 +585,7 @@ func (service *Service) relatedTokenOverlap(left, right string) int {
 		seen[token] = struct{}{}
 		if _, matches := leftTokens[token]; matches {
 			overlap++
-			if overlap == service.config.Discovery.MaxQueryTerms {
+			if overlap == limit {
 				break
 			}
 		}

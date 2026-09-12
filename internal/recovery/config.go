@@ -131,6 +131,7 @@ type DiscoveryConfig struct {
 	SearchConversations bool                     `json:"search_conversations"`
 	SearchFiles         bool                     `json:"search_files"`
 	MaxQueryTerms       int                      `json:"max_query_terms"`
+	MaxNoteOverlapTerms int                      `json:"max_note_overlap_terms"`
 	MinTokenLength      int                      `json:"min_token_length"`
 	QueryFields         []string                 `json:"query_fields"`
 	StopWords           []string                 `json:"stop_words"`
@@ -462,7 +463,7 @@ func (cfg DiscoveryConfig) validate() error {
 	if !cfg.SearchConversations && !cfg.SearchFiles {
 		return errors.New("at least one history search pass is required")
 	}
-	if cfg.MaxQueryTerms < 1 || cfg.MaxQueryTerms > 8 || cfg.MinTokenLength < 2 || cfg.MinTokenLength > 32 {
+	if cfg.MaxQueryTerms < 1 || cfg.MaxQueryTerms > 8 || cfg.MaxNoteOverlapTerms < 1 || cfg.MaxNoteOverlapTerms > cfg.MaxQueryTerms || cfg.MinTokenLength < 2 || cfg.MinTokenLength > 32 {
 		return errors.New("query term limits are outside the supported bounds")
 	}
 	allowedFields := map[string]struct{}{"task_id": {}, "title": {}, "note": {}, "pillar": {}, "repo": {}, "owner": {}, "level": {}}
