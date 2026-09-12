@@ -18,9 +18,12 @@ on:
 permissions:
   contents: read
 
+# A push to main is a durable verdict for that exact commit. Keep it isolated by
+# SHA and never cancel it; pull requests and merge groups stay ref-stable so a
+# newer run for the same ref can replace an obsolete one.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   go-quality:
@@ -36,6 +39,10 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.27.x"
+
+      - name: CI concurrency contract
+        shell: bash
+        run: bash scripts/ci-workflow.test.sh
 
       # The gate's own controls run FIRST, so a PR that weakens the gate fails
       # before the gate is asked to judge the code.
@@ -66,7 +73,7 @@ jobs:
         run: for tool in bash jq curl grep awk; do command -v "$tool"; done
 
       - name: Shell syntax
-        run: bash -n scripts/history-rag-mcp-native.sh scripts/history-rag-mcp-native.test.sh scripts/history-rag-mcp-native.mutation.test.sh scripts/docker-native.test.sh scripts/systemd-native.test.sh scripts/launchd-native.test.sh scripts/windows-native.test.sh scripts/docs-native-contract.test.sh scripts/start.sh scripts/go-coverage-gate.sh scripts/go-coverage-gate.test.sh
+        run: bash -n scripts/history-rag-mcp-native.sh scripts/history-rag-mcp-native.test.sh scripts/history-rag-mcp-native.mutation.test.sh scripts/docker-native.test.sh scripts/systemd-native.test.sh scripts/launchd-native.test.sh scripts/windows-native.test.sh scripts/docs-native-contract.test.sh scripts/start.sh scripts/go-coverage-gate.sh scripts/go-coverage-gate.test.sh scripts/ci-workflow.test.sh
 
       - name: Native MCP security contract
         run: bash scripts/history-rag-mcp-native.test.sh
