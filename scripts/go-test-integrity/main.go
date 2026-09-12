@@ -8,8 +8,10 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"os"
 	"path/filepath"
@@ -87,6 +89,7 @@ func inspectFile(path string) ([]finding, error) {
 }
 
 func inspectAST(fset *token.FileSet, file *ast.File) []finding {
+	info := typeInfo(fset, file)
 	var findings []finding
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -94,7 +97,8 @@ func inspectAST(fset *token.FileSet, file *ast.File) []finding {
 			continue
 		}
 		param, ok := testingTParam(fn)
-		if !ok || bodyCanFail(fn.Body, param) {
+		paramObject := info.Defs[param]
+		if !ok || paramObject == nil || bodyCanFail(fn.Body, paramObject, info) {
 			continue
 		}
 		findings = append(findings, finding{
@@ -106,31 +110,50 @@ func inspectAST(fset *token.FileSet, file *ast.File) []finding {
 	return findings
 }
 
-func isTestName(name string) bool {
-	if !strings.HasPrefix(name, "Test") || len(name) == len("Test") {
-		return false
+func typeInfo(fset *token.FileSet, file *ast.File) *types.Info {
+	info := &types.Info{
+		Defs: map[*ast.Ident]types.Object{},
+		Uses: map[*ast.Ident]types.Object{},
 	}
-	r, _ := utf8.DecodeRuneInString(name[len("Test"):])
-	return unicode.IsUpper(r)
+	config := types.Config{
+		Importer: importer.Default(),
+		Error:    func(error) {},
+	}
+	// A test file can reference package-local declarations not present in this
+	// one-file inspection. Errors do not erase already resolved local bindings,
+	// which are the only facts this integrity check consumes.
+	_, _ = config.Check(file.Name.Name, fset, []*ast.File{file}, info)
+	return info
 }
 
-func testingTParam(fn *ast.FuncDecl) (string, bool) {
+func isTestName(name string) bool {
+	if !strings.HasPrefix(name, "Test") {
+		return false
+	}
+	if len(name) == len("Test") {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(name[len("Test"):])
+	return !unicode.IsLower(r)
+}
+
+func testingTParam(fn *ast.FuncDecl) (*ast.Ident, bool) {
 	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 || len(fn.Type.Params.List[0].Names) != 1 {
-		return "", false
+		return nil, false
 	}
 	field := fn.Type.Params.List[0]
 	star, ok := field.Type.(*ast.StarExpr)
 	if !ok {
-		return "", false
+		return nil, false
 	}
 	selector, ok := star.X.(*ast.SelectorExpr)
 	if !ok || selector.Sel.Name != "T" {
-		return "", false
+		return nil, false
 	}
-	return field.Names[0].Name, true
+	return field.Names[0], true
 }
 
-func bodyCanFail(body *ast.BlockStmt, param string) bool {
+func bodyCanFail(body *ast.BlockStmt, param types.Object, info *types.Info) bool {
 	canFail := false
 	ast.Inspect(body, func(node ast.Node) bool {
 		if canFail || node == nil {
@@ -138,12 +161,14 @@ func bodyCanFail(body *ast.BlockStmt, param string) bool {
 		}
 		switch value := node.(type) {
 		case *ast.Ident:
-			if value.Name == param {
+			if info.Uses[value] == param {
 				canFail = true
 			}
 		case *ast.CallExpr:
-			if fn, ok := value.Fun.(*ast.Ident); ok && fn.Name == "panic" {
-				canFail = true
+			if fn, ok := value.Fun.(*ast.Ident); ok {
+				if builtin, ok := info.Uses[fn].(*types.Builtin); ok && builtin.Name() == "panic" {
+					canFail = true
+				}
 			}
 		}
 		return true

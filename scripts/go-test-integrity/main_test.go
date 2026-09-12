@@ -22,6 +22,11 @@ func TestInspectASTUsesGoSyntaxNotRawText(t *testing.T) {
 		{"spaced", "package p\nimport \"testing\"\nfunc TestSpaced ( t * testing.T ) {}", 1},
 		{"nested and helper", "package p\nimport \"testing\"\nfunc TestNested(t *testing.T) { if true { helper(t) } }\nfunc helper(t *testing.T) {}", 0},
 		{"panic", "package p\nimport \"testing\"\nfunc TestPanic(t *testing.T) { if false { panic(\"failure\") } }", 0},
+		{"shadowed testing parameter", "package p\nimport \"testing\"\nfunc TestShadow(t *testing.T) { if true { t := struct{}{}; _ = t } }", 1},
+		{"shadowed panic", "package p\nimport \"testing\"\nfunc TestShadowPanic(t *testing.T) { panic := func(string) {}; panic(\"not builtin\") }", 1},
+		{"digit test suffix", "package p\nimport \"testing\"\nfunc Test1(t *testing.T) {}", 1},
+		{"underscore test suffix", "package p\nimport \"testing\"\nfunc Test_(t *testing.T) {}", 1},
+		{"lowercase suffix is not a Go test", "package p\nimport \"testing\"\nfunc Testlower(t *testing.T) {}", 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
