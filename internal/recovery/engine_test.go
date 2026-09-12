@@ -151,11 +151,13 @@ func TestRelatedWorkRunsAllConfiguredPassesAndClassifiesCandidates(t *testing.T)
 			{TaskID: "T-OLD", ParentID: "ROOT", Title: "Prior recovery console prompt", Status: "complete", Pillar: "delivery"},
 			{TaskID: "T-LIVE", ParentID: "ROOT", Title: "Recovery console implementation", Status: "in_progress", Pillar: "delivery"},
 			{TaskID: "T-NOISE", Title: "Unrelated work", Status: "in_progress", Note: "Find and reuse existing agent work."},
+			{TaskID: "T-THREAD", ParentID: "ROOT", Title: "Different task", Status: "in_progress", Pillar: "delivery"},
 		},
 		worklinksByTask: map[string][]Worklink{
-			"T-1":    {{TaskID: "T-1", ArtifactType: "worktree", ArtifactRef: "/work/recovery"}},
-			"T-OLD":  {{TaskID: "T-OLD", ArtifactType: "commit", ArtifactRef: "abc123"}},
-			"T-LIVE": {{TaskID: "T-LIVE", ArtifactType: "worktree", ArtifactRef: "/work/recovery"}},
+			"T-1":      {{TaskID: "T-1", ArtifactType: "worktree", ArtifactRef: "/work/recovery", Thread: "/root"}},
+			"T-OLD":    {{TaskID: "T-OLD", ArtifactType: "commit", ArtifactRef: "abc123"}},
+			"T-LIVE":   {{TaskID: "T-LIVE", ArtifactType: "worktree", ArtifactRef: "/work/recovery"}},
+			"T-THREAD": {{TaskID: "T-THREAD", ArtifactType: "finding", ArtifactRef: "different", Thread: "/root"}},
 		},
 	}
 	history := stubHistory{
@@ -185,6 +187,9 @@ func TestRelatedWorkRunsAllConfiguredPassesAndClassifiesCandidates(t *testing.T)
 	}
 	if _, noisy := verdicts["T-NOISE"]; noisy {
 		t.Fatalf("note-only generic overlap crossed the related-work threshold: %#v", verdicts)
+	}
+	if verdicts["T-THREAD"] != "related" {
+		t.Fatalf("a reused agent label was treated as an exact artifact collision: %#v", verdicts)
 	}
 }
 

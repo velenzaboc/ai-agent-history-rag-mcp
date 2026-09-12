@@ -324,13 +324,13 @@ func (service *Service) RelatedWork(ctx context.Context, taskID string) (Related
 	candidates := make([]RelatedTaskCandidate, 0, len(searchCandidates))
 	for _, candidate := range searchCandidates {
 		links := hydrated[candidate.TaskID]
-		score, reasons, sharedArtifact := service.scoreRelatedTask(*task, worklinksOutcome.links, candidate, links)
+		score, similarityScore, reasons, sharedArtifact := service.scoreRelatedTask(*task, worklinksOutcome.links, candidate, links)
 		verdictID := ""
 		if sharedArtifact && service.isActive(candidate.Status) {
 			verdictID = "collision"
-		} else if service.isTerminal(candidate.Status) && score >= service.config.Discovery.Thresholds.ReuseScore {
+		} else if service.isTerminal(candidate.Status) && similarityScore >= service.config.Discovery.Thresholds.ReuseScore {
 			verdictID = "reuse"
-		} else if score >= service.config.Discovery.Thresholds.RelatedScore {
+		} else if similarityScore >= service.config.Discovery.Thresholds.RelatedScore {
 			verdictID = "related"
 		}
 		if verdictID == "" {
@@ -530,7 +530,7 @@ func (service *Service) hydrateCandidateWorklinks(ctx context.Context, candidate
 	return hydrated, errorsByTask
 }
 
-func (service *Service) scoreRelatedTask(root Task, rootLinks []Worklink, candidate Task, candidateLinks []Worklink) (int, []string, bool) {
+func (service *Service) scoreRelatedTask(root Task, rootLinks []Worklink, candidate Task, candidateLinks []Worklink) (int, int, []string, bool) {
 	score := service.config.Discovery.Weights["search_hit"]
 	reasons := make([]string, 0, 8)
 	if service.config.Discovery.Weights["search_hit"] > 0 {
@@ -563,11 +563,12 @@ func (service *Service) scoreRelatedTask(root Task, rootLinks []Worklink, candid
 		score += service.config.Discovery.Weights["shared_artifact"]
 		reasons = append(reasons, "shared_artifact")
 	}
+	similarityScore := score
 	if service.isTerminal(candidate.Status) {
 		score += service.config.Discovery.Weights["terminal"]
 		reasons = append(reasons, "terminal")
 	}
-	return score, reasons, sharedArtifact
+	return score, similarityScore, reasons, sharedArtifact
 }
 
 func (service *Service) relatedTokenOverlap(left, right string) int {
@@ -584,6 +585,9 @@ func (service *Service) relatedTokenOverlap(left, right string) int {
 		seen[token] = struct{}{}
 		if _, matches := leftTokens[token]; matches {
 			overlap++
+			if overlap == service.config.Discovery.MaxQueryTerms {
+				break
+			}
 		}
 	}
 	return overlap
@@ -611,18 +615,10 @@ func worklinksOverlap(left, right []Worklink, normalize func(string) string) boo
 		if ref := normalize(link.ArtifactRef); ref != "" {
 			keys[strings.ToLower(link.ArtifactType)+"\x00"+ref] = struct{}{}
 		}
-		if thread := strings.ToLower(strings.TrimSpace(link.Thread)); thread != "" {
-			keys["thread\x00"+thread] = struct{}{}
-		}
 	}
 	for _, link := range right {
 		if ref := normalize(link.ArtifactRef); ref != "" {
 			if _, exists := keys[strings.ToLower(link.ArtifactType)+"\x00"+ref]; exists {
-				return true
-			}
-		}
-		if thread := strings.ToLower(strings.TrimSpace(link.Thread)); thread != "" {
-			if _, exists := keys["thread\x00"+thread]; exists {
 				return true
 			}
 		}
