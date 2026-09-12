@@ -62,7 +62,7 @@ func TestBuildDashboardDoesNotInferMissingWorklinkForOverlayOnlyTask(t *testing.
 func TestResumePacketOrdersHistoryBeforeGraphContext(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	cfg := mustTestConfig(t)
-	fleet := stubFleet{snapshot: FleetSnapshot{ProjectID: "project-a", Tasks: []Task{{TaskID: "T-1", Title: "Task one", Status: "in_progress", UpdatedAt: now}}}}
+	fleet := stubFleet{snapshot: FleetSnapshot{ProjectID: "project-a", Tasks: []Task{{TaskID: "T-1", Title: "Task one", Status: "in_progress", UpdatedAt: now}}}, worklinks: []Worklink{{TaskID: "T-1", ArtifactType: "pr", ArtifactRef: "https://example.invalid/pr/1"}}}
 	history := stubHistory{session: SessionSummary{SessionID: "s-1", Summary: "LAST ACTION: ran the validator. INTENT: correct the rejected row.", Timestamp: now}}
 	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
 	if err != nil {
@@ -74,7 +74,7 @@ func TestResumePacketOrdersHistoryBeforeGraphContext(t *testing.T) {
 	}
 	historyAt := strings.Index(packet.Text, "LAST ACTION")
 	graphAt := strings.Index(packet.Text, "Task one")
-	if historyAt < 0 || graphAt < 0 || historyAt >= graphAt {
+	if historyAt < 0 || graphAt < 0 || historyAt >= graphAt || !strings.Contains(packet.Text, "https://example.invalid/pr/1") {
 		t.Fatalf("resume packet did not preserve evidence order:\n%s", packet.Text)
 	}
 }
@@ -115,11 +115,15 @@ func hasFinding(findings []Finding, kind, taskID, sessionID string) bool {
 }
 
 type stubFleet struct {
-	snapshot FleetSnapshot
-	err      error
+	snapshot  FleetSnapshot
+	worklinks []Worklink
+	err       error
 }
 
 func (s stubFleet) Snapshot(context.Context) (FleetSnapshot, error) { return s.snapshot, s.err }
+func (s stubFleet) Worklinks(context.Context, string) ([]Worklink, error) {
+	return s.worklinks, s.err
+}
 
 type stubHistory struct {
 	recent       HistoryBatch

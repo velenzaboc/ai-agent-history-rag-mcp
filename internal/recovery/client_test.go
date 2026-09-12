@@ -19,7 +19,7 @@ func TestMCPFleetClientParsesStreamableHTTPEvent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", Scope: "project", Limit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", Scope: "project", Limit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestMCPFleetClientOverlaysActiveTasksOutsideBoundedSnapshot(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", TasksTool: "tasks", Scope: "project", Limit: 1, ActiveLimit: 10, MaxResponseBytes: 1 << 20}, []string{"in_progress", "blocked"}, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", TasksTool: "tasks", WorklinksTool: "worklinks", Scope: "project", Limit: 1, ActiveLimit: 10, MaxResponseBytes: 1 << 20}, []string{"in_progress", "blocked"}, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +74,39 @@ func TestMCPFleetClientOverlaysActiveTasksOutsideBoundedSnapshot(t *testing.T) {
 	}
 	if snapshot.Tasks[0].Title != "Current title" || snapshot.Tasks[0].Projection != "snapshot+active_overlay" || snapshot.Tasks[1].Projection != "active_overlay" {
 		t.Fatalf("unexpected overlay merge: %#v", snapshot.Tasks)
+	}
+}
+
+func TestMCPFleetClientLoadsExactTaskWorklinks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID     int64 `json:"id"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Params.Name != "worklinks" || request.Params.Arguments["task_id"] != "T-1" {
+			t.Fatalf("unexpected exact worklink request: %#v", request.Params)
+		}
+		result := map[string]any{"worklinks": []Worklink{{ProjectID: "project-a", TaskID: "T-1", ArtifactID: "A-1", ArtifactType: "pr", ArtifactRef: "https://example.invalid/pr/1"}}}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"structuredContent": result}})
+	}))
+	defer server.Close()
+
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", Scope: "project", Limit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	links, err := client.Worklinks(context.Background(), "T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].ArtifactID != "A-1" {
+		t.Fatalf("unexpected exact worklinks: %#v", links)
 	}
 }
 

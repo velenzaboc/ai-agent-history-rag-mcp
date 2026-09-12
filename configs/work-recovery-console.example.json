@@ -14,6 +14,7 @@
     "project_id": "replace-me",
     "snapshot_tool": "task_graph_project_snapshot",
     "tasks_tool": "task_graph_tasks",
+    "worklinks_tool": "task_graph_worklinks",
     "scope": "project",
     "root_task_id": "",
     "limit": 1000,

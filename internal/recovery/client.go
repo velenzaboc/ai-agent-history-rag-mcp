@@ -20,6 +20,32 @@ var ErrSessionNotFound = errors.New("session history was not returned")
 
 type FleetSource interface {
 	Snapshot(context.Context) (FleetSnapshot, error)
+	Worklinks(context.Context, string) ([]Worklink, error)
+}
+
+func (client *MCPFleetClient) Worklinks(ctx context.Context, taskID string) ([]Worklink, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || len(taskID) > 512 {
+		return nil, errors.New("task id is invalid")
+	}
+	var result struct {
+		Worklinks []Worklink `json:"worklinks"`
+	}
+	if err := client.callTool(ctx, client.config.WorklinksTool, map[string]any{
+		"project_id": client.config.ProjectID,
+		"task_id":    taskID,
+	}, &result); err != nil {
+		return nil, err
+	}
+	for _, link := range result.Worklinks {
+		if link.TaskID != "" && link.TaskID != taskID {
+			return nil, fmt.Errorf("worklink %q belongs to unexpected task %q", link.ArtifactID, link.TaskID)
+		}
+		if link.ProjectID != "" && link.ProjectID != client.config.ProjectID {
+			return nil, fmt.Errorf("worklink %q belongs to unexpected project %q", link.ArtifactID, link.ProjectID)
+		}
+	}
+	return result.Worklinks, nil
 }
 
 type HistorySource interface {

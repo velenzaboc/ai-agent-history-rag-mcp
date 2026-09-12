@@ -69,6 +69,10 @@ console therefore does not classify an overlay-only task as unlinked. This keeps
 the recovery inbox useful without turning a partial read into false absence
 evidence.
 
+Selecting a task calls the configured `worklinks_tool` for that exact task. The
+drawer and restart-prompt path therefore use current durable work links even
+when the task itself arrived only through the active overlay.
+
 Recent history is independently bounded by `recent_limit`. Session IDs found in
 work links can be checked with `probe_limit`; setting that value to zero disables
 the probes. Search results and recent results populate a bounded in-memory cache
@@ -81,7 +85,7 @@ cannot retrieve the same session by exact ID.
 |---|---|
 | root | listener, base path, request timeout, shutdown timeout |
 | `access` | optional bearer protection for the console itself; `none` requires a loopback listener |
-| `fleet` | MCP URL, project and root scope, tool names, coherent/active limits, response bound |
+| `fleet` | MCP URL, project and root scope, snapshot/active/exact-worklink tool names, coherent/active limits, response bound |
 | `history` | compatibility API URL and paths, auth environment name, search behavior, cache/probe/response bounds |
 | `matching` | session-ID grammar, cross-machine path normalization, evidence weights, acceptance thresholds |
 | `classification` | stale/abandoned ages plus finding labels, severities, and colors |

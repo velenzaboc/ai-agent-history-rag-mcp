@@ -89,9 +89,29 @@ func TestServerRequiresConfiguredBearer(t *testing.T) {
 	}
 }
 
+func TestServerReturnsExactTaskWorklinks(t *testing.T) {
+	cfg := mustTestConfig(t)
+	application := stubApplication{worklinks: TaskWorklinks{TaskID: "T-1", Worklinks: []Worklink{{TaskID: "T-1", ArtifactID: "A-1"}}}}
+	server, err := NewServer(cfg, application, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/task/worklinks?task_id=T-1", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("worklinks status = %d body=%s", response.Code, response.Body.String())
+	}
+	var result TaskWorklinks
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.TaskID != "T-1" || len(result.Worklinks) != 1 {
+		t.Fatalf("unexpected worklinks response: %#v error=%v", result, err)
+	}
+}
+
 type stubApplication struct {
 	dashboard Dashboard
 	search    HistoryBatch
+	worklinks TaskWorklinks
 	packet    ResumePacket
 	err       error
 }
@@ -99,6 +119,9 @@ type stubApplication struct {
 func (s stubApplication) Dashboard(context.Context) (Dashboard, error) { return s.dashboard, s.err }
 func (s stubApplication) Search(context.Context, HistorySearch) (HistoryBatch, error) {
 	return s.search, s.err
+}
+func (s stubApplication) Worklinks(context.Context, string) (TaskWorklinks, error) {
+	return s.worklinks, s.err
 }
 func (s stubApplication) ResumePacket(context.Context, string, string) (ResumePacket, error) {
 	return s.packet, s.err

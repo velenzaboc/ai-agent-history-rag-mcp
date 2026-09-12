@@ -139,6 +139,18 @@ func (service *Service) Search(ctx context.Context, search HistorySearch) (Histo
 	return batch, err
 }
 
+func (service *Service) Worklinks(ctx context.Context, taskID string) (TaskWorklinks, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || len(taskID) > 512 {
+		return TaskWorklinks{}, errors.New("task_id is required")
+	}
+	links, err := service.fleet.Worklinks(ctx, taskID)
+	if err != nil {
+		return TaskWorklinks{}, fmt.Errorf("read task worklinks: %w", err)
+	}
+	return TaskWorklinks{TaskID: taskID, Worklinks: links}, nil
+}
+
 func (service *Service) ResumePacket(ctx context.Context, taskID, sessionID string) (ResumePacket, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	taskID = strings.TrimSpace(taskID)
@@ -153,8 +165,13 @@ func (service *Service) ResumePacket(ctx context.Context, taskID, sessionID stri
 		session SessionSummary
 		err     error
 	}
+	type worklinksResult struct {
+		links []Worklink
+		err   error
+	}
 	fleetChannel := make(chan fleetResult, 1)
 	historyChannel := make(chan historyResult, 1)
+	worklinksChannel := make(chan worklinksResult, 1)
 	go func() {
 		snapshot, err := service.fleet.Snapshot(ctx)
 		fleetChannel <- fleetResult{snapshot: snapshot, err: err}
@@ -167,6 +184,14 @@ func (service *Service) ResumePacket(ctx context.Context, taskID, sessionID stri
 			historyChannel <- historyResult{session: session, err: err}
 		}()
 	}
+	if taskID == "" {
+		worklinksChannel <- worklinksResult{}
+	} else {
+		go func() {
+			links, err := service.fleet.Worklinks(ctx, taskID)
+			worklinksChannel <- worklinksResult{links: links, err: err}
+		}()
+	}
 	historyOutcome := <-historyChannel
 	if historyOutcome.err != nil {
 		return ResumePacket{}, fmt.Errorf("read session history: %w", historyOutcome.err)
@@ -174,6 +199,10 @@ func (service *Service) ResumePacket(ctx context.Context, taskID, sessionID stri
 	fleetOutcome := <-fleetChannel
 	if fleetOutcome.err != nil {
 		return ResumePacket{}, fmt.Errorf("read fleet snapshot: %w", fleetOutcome.err)
+	}
+	worklinksOutcome := <-worklinksChannel
+	if worklinksOutcome.err != nil {
+		return ResumePacket{}, fmt.Errorf("read exact task worklinks: %w", worklinksOutcome.err)
 	}
 	var task *Task
 	for index := range fleetOutcome.snapshot.Tasks {
@@ -204,7 +233,7 @@ func (service *Service) ResumePacket(ctx context.Context, taskID, sessionID stri
 			fmt.Fprintf(&builder, "- %s -> %s (%s)\n", dependency.TaskID, dependency.DependsOnTaskID, dependency.Kind)
 		}
 	}
-	links := worklinksForTask(fleetOutcome.snapshot.Worklinks, taskID)
+	links := worklinksOutcome.links
 	if len(links) > 0 {
 		builder.WriteString("Durable work links:\n")
 		for _, link := range links {

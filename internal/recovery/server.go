@@ -24,6 +24,7 @@ var webAssets embed.FS
 type Application interface {
 	Dashboard(context.Context) (Dashboard, error)
 	Search(context.Context, HistorySearch) (HistoryBatch, error)
+	Worklinks(context.Context, string) (TaskWorklinks, error)
 	ResumePacket(context.Context, string, string) (ResumePacket, error)
 }
 
@@ -68,8 +69,24 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+server.route("healthz"), server.serveHealth)
 	mux.HandleFunc("GET "+server.route("api/dashboard"), server.serveDashboard)
 	mux.HandleFunc("POST "+server.route("api/history/search"), server.serveSearch)
+	mux.HandleFunc("GET "+server.route("api/task/worklinks"), server.serveWorklinks)
 	mux.HandleFunc("GET "+server.route("api/resume"), server.serveResume)
 	return server.fixedHeaders(server.authenticate(mux))
+}
+
+func (server *Server) serveWorklinks(response http.ResponseWriter, request *http.Request) {
+	taskID := strings.TrimSpace(request.URL.Query().Get("task_id"))
+	if len(taskID) > 512 || taskID == "" {
+		server.writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	result, err := server.app.Worklinks(request.Context(), taskID)
+	if err != nil {
+		server.logger.Printf("task worklinks failed: %v", err)
+		server.writeError(response, http.StatusBadGateway, "task_worklinks_unavailable")
+		return
+	}
+	server.writeJSON(response, http.StatusOK, result)
 }
 
 func (server *Server) HTTPServer() *http.Server {

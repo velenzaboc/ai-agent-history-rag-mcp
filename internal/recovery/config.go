@@ -50,6 +50,7 @@ type FleetConfig struct {
 	ProjectID        string `json:"project_id"`
 	SnapshotTool     string `json:"snapshot_tool"`
 	TasksTool        string `json:"tasks_tool"`
+	WorklinksTool    string `json:"worklinks_tool"`
 	Scope            string `json:"scope"`
 	RootTaskID       string `json:"root_task_id"`
 	Limit            int    `json:"limit"`
@@ -264,11 +265,11 @@ func (cfg FleetConfig) validate() error {
 	if err := validateEndpoint(cfg.Endpoint); err != nil {
 		return err
 	}
-	if strings.TrimSpace(cfg.ProjectID) == "" || strings.TrimSpace(cfg.SnapshotTool) == "" || strings.TrimSpace(cfg.Scope) == "" {
-		return errors.New("project_id, snapshot_tool, and scope are required")
+	if strings.TrimSpace(cfg.ProjectID) == "" || strings.TrimSpace(cfg.SnapshotTool) == "" || strings.TrimSpace(cfg.WorklinksTool) == "" || strings.TrimSpace(cfg.Scope) == "" {
+		return errors.New("project_id, snapshot_tool, worklinks_tool, and scope are required")
 	}
-	if !identifierPattern.MatchString(cfg.SnapshotTool) {
-		return errors.New("snapshot_tool is invalid")
+	if !identifierPattern.MatchString(cfg.SnapshotTool) || !identifierPattern.MatchString(cfg.WorklinksTool) {
+		return errors.New("snapshot_tool or worklinks_tool is invalid")
 	}
 	if cfg.Limit < 1 || cfg.Limit > 100000 {
 		return errors.New("limit must be between 1 and 100000")

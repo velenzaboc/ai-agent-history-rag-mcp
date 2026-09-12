@@ -73,6 +73,11 @@ type Worklink struct {
 	Thread       string `json:"thread"`
 }
 
+type TaskWorklinks struct {
+	TaskID    string     `json:"task_id"`
+	Worklinks []Worklink `json:"worklinks"`
+}
+
 type SessionSummary struct {
 	ChunkID     string    `json:"chunk_id"`
 	SessionID   string    `json:"session_id"`
