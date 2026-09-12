@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 GATE="$ROOT_DIR/scripts/go-coverage-gate.sh"
+export GOFLAGS=
 # Fixtures must stay below this checkout rather than an OS temporary directory.
 # The guarded PID leaf is exclusive and cleanup cannot escape TMP_ROOT.
 TMP_BASE="${COVERAGE_GATE_TEST_WORK_ROOT:-$ROOT_DIR/.go-coverage-gate-test-work}"
@@ -31,7 +32,15 @@ fail() { printf 'FAIL %s\n' "$1" >&2; printf -- '--- gate output ---\n%s\n------
 run_gate() {
   local dir="$1"; shift
   set +e
-  ( cd "$dir" && GOFLAGS= bash "$GATE" --dir "$dir" "$@" ) >"$OUT" 2>&1
+  ( cd "$dir" && bash "$GATE" --dir "$dir" "$@" ) >"$OUT" 2>&1
+  GATE_STATUS=$?
+  set -e
+}
+
+run_gate_with_path() {
+  local dir="$1" path="$2"; shift 2
+  set +e
+  ( cd "$dir" && PATH="$path" bash "$GATE" --dir "$dir" "$@" ) >"$OUT" 2>&1
   GATE_STATUS=$?
   set -e
 }
@@ -41,7 +50,7 @@ run_gate() {
 run_gate_legacy_interface() {
   local dir="$1"
   set +e
-  ( cd "$dir" && GOFLAGS= bash "$GATE" "$dir" ) >"$OUT" 2>&1
+  ( cd "$dir" && bash "$GATE" "$dir" ) >"$OUT" 2>&1
   GATE_STATUS=$?
   set -e
 }
@@ -249,6 +258,143 @@ expect_status "assertion-free test fails" 1
 expect_output "assertion-free test fails" "ASSERTION-FREE TEST"
 expect_output "assertion-free test fails" "TestHollow"
 pass "a test that never references its *testing.T parameter fails the run"
+
+# The assertion detector must use Go syntax, not raw source text. Comments and
+# strings cannot count as testing.T references; legal spaces cannot hide a test
+# signature; and a brace at column one inside a raw string cannot terminate a
+# parsed function body early.
+DIR="$(new_module parsermod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/parser_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func TestCommentOnly(t *testing.T) {
+	// t
+}
+
+func TestQuotedOnly(t *testing.T) {
+	_ = "t"
+}
+
+func TestRawOnly(t *testing.T) {
+	_ = `t
+}`
+}
+
+func TestSpaced ( t * testing.T ) {
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "parser rejects comment string raw-string and spaced hollow tests" 1
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestCommentOnly"
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestQuotedOnly"
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestRawOnly"
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestSpaced"
+pass "Go-parser integrity rejects raw-text bypasses and legal spaced syntax"
+
+# Over-block controls: nested blocks and a raw-string brace remain syntactic
+# content, helper delegation passes t, and a conditional panic is a real failure
+# path even though it does not need testing.T.
+DIR="$(new_module parserpositive)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/parser_positive_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func helper(t *testing.T) {
+	t.Helper()
+}
+
+func TestNested(t *testing.T) {
+	if true {
+		_ = `
+}`
+		helper(t)
+	}
+}
+
+func TestPanicPath(t *testing.T) {
+	if F1() == 0 {
+		panic("real failure path")
+	}
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "parser over-block controls pass" 0
+expect_no_output "parser over-block controls pass" "ASSERTION-FREE TEST"
+pass "nested raw strings helper delegation and panic failure paths stay valid"
+
+# A _test.go filename is not an executed test. The package has a test file and
+# full initialization coverage, but no test event, so it must fail.
+DIR="$(new_module noexecutedmod)"
+mkdir -p "$DIR/alpha"
+cat >"$DIR/alpha/code.go" <<'EOF'
+package alpha
+
+func Value() int { return 1 }
+
+func init() { _ = Value() }
+EOF
+printf 'package alpha\n' >"$DIR/alpha/empty_test.go"
+run_gate "$DIR" --floor 85
+expect_status "zero executed tests fail" 1
+expect_output "zero executed tests fail" "NO TEST EXECUTED"
+pass "a package with only an empty _test.go file cannot pass"
+
+# Caller GOFLAGS cannot focus the suite. The gate neutralizes it, so the test
+# that a focused command would hide actually runs and fails.
+DIR="$(new_module focusedmod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/focus_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func TestFocused(t *testing.T) {
+	if F1() == 0 { t.Fatal("bad") }
+}
+
+func TestUnfocused(t *testing.T) {
+	t.Fatal("must not be hidden by GOFLAGS")
+}
+EOF
+GOFLAGS=-run=TestFocused run_gate "$DIR" --floor 85
+expect_status "focused caller flags cannot hide a test" 1
+expect_output "focused caller flags cannot hide a test" "TestUnfocused"
+pass "caller GOFLAGS focus is neutralized before discovery and execution"
+
+# The second go list is a required assertion-file enumeration, not a best-effort
+# convenience. A wrapper fails only that form while preserving the denominator.
+DIR="$(new_module enumerationmod)"
+add_good_package "$DIR" alpha
+mkdir -p "$DIR/fakebin"
+REAL_GO="$(command -v go)"
+cat >"$DIR/fakebin/go" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "list" && "\$2" == "-f" && "\$3" == *'.Dir'* ]]; then
+  exit 73
+fi
+exec "$REAL_GO" "\$@"
+EOF
+chmod +x "$DIR/fakebin/go"
+run_gate_with_path "$DIR" "$DIR/fakebin:$PATH" --floor 85
+expect_status "assertion-file enumeration failure fails closed" 1
+expect_output "assertion-file enumeration failure fails closed" "test-file enumeration failed"
+pass "an assertion-file enumeration error cannot disappear behind a pipeline"
+
+# The scratch root is fixed below the physical checkout and refuses a symlink,
+# so allocation and cleanup cannot follow it outside the module.
+DIR="$(new_module scratchmod)"
+add_good_package "$DIR" alpha
+mkdir -p "$DIR/outside"
+ln -s "$DIR/outside" "$DIR/.coverage-gate-work"
+run_gate "$DIR" --floor 85
+expect_status "symlink scratch root is rejected" 2
+expect_output "symlink scratch root is rejected" "scratch root must not be a symlink"
+pass "scratch allocation refuses a symlink before creating or removing a leaf"
 
 # OVER-BLOCK CONTROL for the same detector: a test that delegates its checking
 # to a helper still passes t, and must NOT be reported.

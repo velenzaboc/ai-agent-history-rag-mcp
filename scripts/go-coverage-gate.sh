@@ -60,8 +60,14 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 if [[ -n "$MODULE_DIR" ]]; then
-  cd "$MODULE_DIR"
+  cd -P -- "$MODULE_DIR"
 fi
+MODULE_ROOT="$(pwd -P)"
+
+# A caller's GOFLAGS can focus, skip, list, benchmark, or fuzz only a subset of
+# tests. The gate measures the whole module, so it deliberately neutralizes all
+# caller Go flags before both package discovery and test execution.
+export GOFLAGS=
 
 for tool in go awk jq sort; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -70,11 +76,30 @@ for tool in go awk jq sort; do
   }
 done
 
-# Keep transient gate state inside the measured checkout (or an explicitly
-# declared build root), never in the host OS temporary directory. The PID-only
-# leaf is fail-closed on collision and is removed without touching its parent.
-WORK_ROOT="${COVERAGE_GATE_WORK_ROOT:-$PWD/.coverage-gate-work}"
-mkdir -p -- "$WORK_ROOT"
+# Keep transient gate state inside the physical measured checkout. An override
+# is intentionally rejected: an arbitrary path or symlink would make cleanup
+# capable of escaping the checkout.
+if [[ -v COVERAGE_GATE_WORK_ROOT ]]; then
+  printf 'go-coverage-gate: COVERAGE_GATE_WORK_ROOT is unsupported; scratch stays in the physical checkout\n' >&2
+  exit 2
+fi
+WORK_ROOT="$MODULE_ROOT/.coverage-gate-work"
+if [[ -L "$WORK_ROOT" ]]; then
+  printf 'go-coverage-gate: scratch root must not be a symlink: %s\n' "$WORK_ROOT" >&2
+  exit 2
+fi
+if [[ -e "$WORK_ROOT" && ! -d "$WORK_ROOT" ]]; then
+  printf 'go-coverage-gate: scratch root is not a directory: %s\n' "$WORK_ROOT" >&2
+  exit 2
+fi
+if [[ ! -e "$WORK_ROOT" ]] && ! mkdir -- "$WORK_ROOT"; then
+  printf 'go-coverage-gate: cannot create checkout-local scratch root: %s\n' "$WORK_ROOT" >&2
+  exit 2
+fi
+if [[ -L "$WORK_ROOT" ]]; then
+  printf 'go-coverage-gate: scratch root must not be a symlink: %s\n' "$WORK_ROOT" >&2
+  exit 2
+fi
 WORK="$WORK_ROOT/run-$$"
 if ! mkdir -- "$WORK"; then
   printf 'go-coverage-gate: cannot allocate isolated work directory: %s\n' "$WORK" >&2
@@ -137,6 +162,7 @@ jq -r 'select(.Action=="fail") | "FAILING TEST  " + .Package + (if .Test then " 
 jq -r 'select(.Action=="skip" and (.Test != null)) | "SKIPPED TEST  " + .Package + " :: " + .Test' \
   "$EVENTS" >"$WORK/skips.txt" || hard_fail "could not parse go test -json output"
 TESTS_RUN="$(jq -r 'select(.Action=="pass" and (.Test != null)) | .Package + "::" + .Test' "$EVENTS" | sort -u | wc -l | tr -d ' ')"
+jq -r 'select(.Action=="run" and (.Test != null)) | .Package' "$EVENTS" | sort -u >"$WORK/tests-executed.tsv" || hard_fail "could not parse go test -json output"
 
 if [[ -s "$WORK/failures.txt" ]]; then
   printf '\n'; cat "$WORK/failures.txt" >&2; INTEGRITY_FAILED=1
@@ -148,18 +174,24 @@ if [[ $GO_TEST_STATUS -ne 0 && ! -s "$WORK/failures.txt" ]]; then
   hard_fail "go test exited $GO_TEST_STATUS with no failure event; the run did not complete"
 fi
 
-# A test function whose body never once references its own *testing.T parameter
-# cannot fail. This detector is deliberately narrow: a test that delegates to a
-# helper still passes t, so it is not flagged.
-go list -f '{{$d := .Dir}}{{range .TestGoFiles}}{{$d}}/{{.}}
+# A Go parser owns source semantics here. Comments, quoted strings, raw strings,
+# braces, and legal whitespace are syntax, not a raw-text approximation.
+if ! go list -f '{{$d := .Dir}}{{range .TestGoFiles}}{{$d}}/{{.}}
 {{end}}{{range .XTestGoFiles}}{{$d}}/{{.}}
-{{end}}' ./... 2>/dev/null | grep -v '^$' >"$WORK/testfiles.txt" || true
-if [[ -s "$WORK/testfiles.txt" ]]; then
-  # shellcheck disable=SC2046
-  awk -f "$SCRIPT_DIR/go-assertion-free-tests.awk" $(cat "$WORK/testfiles.txt") >"$WORK/assertionfree.txt"
-  if [[ -s "$WORK/assertionfree.txt" ]]; then
-    printf '\n'; cat "$WORK/assertionfree.txt" >&2; INTEGRITY_FAILED=1
-  fi
+{{end}}' ./... >"$WORK/testfiles.txt" 2>"$WORK/testfiles.err"; then
+  printf '%s\n' "$(cat "$WORK/testfiles.err")" >&2
+  hard_fail "test-file enumeration failed; assertion integrity is unknown"
+fi
+if [[ ! -s "$WORK/testfiles.txt" ]]; then
+  hard_fail "test-file enumeration returned no files; assertion integrity is unknown"
+fi
+set +e
+go run "$SCRIPT_DIR/go-test-integrity/main.go" --files "$WORK/testfiles.txt" >"$WORK/assertionfree.txt" 2>"$WORK/assertionfree.err"
+PARSER_STATUS=$?
+set -e
+if [[ $PARSER_STATUS -ne 0 ]]; then
+  printf '\n'; cat "$WORK/assertionfree.txt" >&2; cat "$WORK/assertionfree.err" >&2
+  INTEGRITY_FAILED=1
 fi
 
 # ---------------------------------------------------------------------------
@@ -196,8 +228,9 @@ fi
 # 5. Join coverage onto the denominator and rule on EVERY package.
 # ---------------------------------------------------------------------------
 set +e
-awk -v floor="$FLOOR" -v expected="$UNITS_MEASURED" '
-  FNR == NR { cov[$1] = $2; tot[$1] = $3; next }
+awk -v floor="$FLOOR" -v expected="$UNITS_MEASURED" -v covfile="$WORK/pkgcov.txt" -v executedfile="$WORK/tests-executed.tsv" '
+  FILENAME == covfile { cov[$1] = $2; tot[$1] = $3; next }
+  FILENAME == executedfile { executed[$1] = 1; next }
   {
     pkg = $1; ntest = $2 + 0; nxtest = $3 + 0
     rows++
@@ -209,6 +242,12 @@ awk -v floor="$FLOOR" -v expected="$UNITS_MEASURED" '
       # Closes escape hatch (b): presence is mandatory. A package with no test
       # files appears at 0.0% and fails; it is never silently absent.
       printf "FAIL    %6.1f%%   %s   [NO TEST FILES: 0 of %d statements covered]\n", 0.0, pkg, t
+      failed++
+      if (!havemin || 0.0 < min) { min = 0.0; havemin = 1; minpkg = pkg }
+      next
+    }
+    if (!(pkg in executed)) {
+      printf "FAIL       0.0%%   %s   [NO TEST EXECUTED]\n", pkg
       failed++
       if (!havemin || 0.0 < min) { min = 0.0; havemin = 1; minpkg = pkg }
       next
@@ -247,7 +286,7 @@ awk -v floor="$FLOOR" -v expected="$UNITS_MEASURED" '
     printf "packages_below_floor=%d\n", failed + 0
     exit (failed + 0 > 0) ? 1 : 0
   }
-' "$WORK/pkgcov.txt" "$WORK/packages.tsv"
+' "$WORK/pkgcov.txt" "$WORK/tests-executed.tsv" "$WORK/packages.tsv"
 COVERAGE_STATUS=$?
 set -e
 
