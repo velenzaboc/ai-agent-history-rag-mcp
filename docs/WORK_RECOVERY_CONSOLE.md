@@ -17,8 +17,11 @@ a second work-state database.
 - A recovery inbox, sorted by configured severity and age, for abandoned or
   unlinked history, stale active threads, missing history references, ambiguous
   bindings, and active tasks without a durable work link.
-- Status lanes whose grouping, order, colors, and active/terminal meaning come
+- A KANBAN screen whose columns, order, colors, and active/terminal meaning come
   entirely from configuration.
+- Configured program pages backed by complete `execution_subtree` reads. Each
+  page shows its expected lane roster, stage controls, live descendant work,
+  dependency and work-link totals, and optional source-handover coordinates.
 - A task inventory with the task's source projection, owner, level, and work-link
   count.
 - Milestone rollups derived from configured level names, parent relationships,
@@ -29,6 +32,9 @@ a second work-state database.
 - A copyable restart prompt that anchors resumption in the selected history
   summary first, followed by current task-graph context, dependencies, and
   durable work links.
+- A copyable task prompt on every task drawer, including tasks with no linked
+  history session. It is built from that task's coherent
+  `acceptance_dependency_closure` plus its exact durable work links.
 
 The console never writes either source. A relationship is a scored display
 projection, not a task-graph mutation or new authority.
@@ -73,6 +79,21 @@ Selecting a task calls the configured `worklinks_tool` for that exact task. The
 drawer and restart-prompt path therefore use current durable work links even
 when the task itself arrived only through the active overlay.
 
+The task-prompt path does not depend on a history match. It requests a coherent
+`acceptance_dependency_closure` rooted at the selected task, bounded by
+`fleet.task_prompt_limit`, and combines the root task contract, context tasks,
+dependency edges, revision evidence, and exact work links into a deterministic
+prompt. The receiving agent is instructed to keep the stable task identity and
+resume an existing binding before creating work.
+
+Each `programs` entry is a lazy-loaded page. The console requests an
+`execution_subtree` rooted at its configured `root_task_id`, then chooses lane
+roots by immediate parent plus `lane_task_id_prefix`. Stage rows are recognized
+only by the configured stage prefixes. `expected_lane_count` is displayed as a
+completeness check; a mismatch or capped/incomplete source read is visible and
+is never silently treated as complete. Program-specific titles, thread IDs,
+checkpoint references, prefixes, and counts belong only in deployment config.
+
 Recent history is independently bounded by `recent_limit`. Session IDs found in
 work links can be checked with `probe_limit`; setting that value to zero disables
 the probes. Search results and recent results populate a bounded in-memory cache
@@ -85,17 +106,18 @@ cannot retrieve the same session by exact ID.
 |---|---|
 | root | listener, base path, request timeout, shutdown timeout |
 | `access` | optional bearer protection for the console itself; `none` requires a loopback listener |
-| `fleet` | MCP URL, project and root scope, snapshot/active/exact-worklink tool names, coherent/active limits, response bound |
+| `fleet` | MCP URL, project and root scope, snapshot/active/exact-worklink tool names, coherent/active/task-prompt limits, response bound |
 | `history` | compatibility API URL and paths, auth environment name, search behavior, cache/probe/response bounds |
 | `matching` | session-ID grammar, cross-machine path normalization, evidence weights, acceptance thresholds |
 | `classification` | stale/abandoned ages plus finding labels, severities, and colors |
+| `programs` | zero or more live subtree pages: navigation text, root and lane identity, expected lane count, stage prefixes, source-thread coordinates, and subtree limit |
 | `status` | lane taxonomy, active and terminal groups, milestone level names |
 | `view` | title, wording, refresh/cache timing, display bounds, labels, and theme |
 
 All environment-specific values belong in the deployment config or process
-environment. No project ID, hostname, filesystem root, status vocabulary,
-milestone vocabulary, label, color, scoring rule, or source endpoint is compiled
-into the command.
+environment. No project ID, hostname, filesystem root, task or thread ID,
+program root, lane roster, status vocabulary, milestone vocabulary, label,
+color, scoring rule, or source endpoint is compiled into the command.
 
 ## Private tailnet access
 
@@ -137,5 +159,6 @@ node --check internal/recovery/web/app.js
 ```
 
 After starting a configured instance, verify `GET /healthz`, force one
-`GET /api/dashboard?fresh=1`, exercise history search, open a recovery item, and
-copy its restart prompt from a real browser.
+`GET /api/dashboard?fresh=1`, load every configured `GET /api/program?id=...`,
+exercise history search, open a KANBAN task with and without a history match,
+and copy both task and restart prompts from a real browser.

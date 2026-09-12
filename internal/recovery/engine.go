@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -123,7 +124,7 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 			HistoryLimit: service.config.History.RecentLimit, HistoryPartial: batch.Partial,
 			HistoryProbed: probed, HistoryReturned: len(sessions),
 		},
-		View: service.config.View, Status: service.config.Status, Classification: service.config.Classification,
+		View: service.config.View, Status: service.config.Status, Classification: service.config.Classification, Programs: service.config.Programs,
 		Counts:  DashboardCounts{Tasks: len(fleetOutcome.snapshot.Tasks), Sessions: len(sessions), Relationships: len(relationships), Findings: len(findings), HighSeverity: high, Milestones: milestones},
 		Sources: []SourceStatus{fleetStatus, historyStatus}, Tasks: fleetOutcome.snapshot.Tasks,
 		Dependencies: fleetOutcome.snapshot.Dependencies, Worklinks: fleetOutcome.snapshot.Worklinks,
@@ -149,6 +150,159 @@ func (service *Service) Worklinks(ctx context.Context, taskID string) (TaskWorkl
 		return TaskWorklinks{}, fmt.Errorf("read task worklinks: %w", err)
 	}
 	return TaskWorklinks{TaskID: taskID, Worklinks: links}, nil
+}
+
+func (service *Service) Program(ctx context.Context, programID string) (ProgramView, error) {
+	programID = strings.TrimSpace(programID)
+	var program *ProgramConfig
+	for index := range service.config.Programs {
+		if service.config.Programs[index].ID == programID {
+			program = &service.config.Programs[index]
+			break
+		}
+	}
+	if program == nil {
+		return ProgramView{}, errors.New("program is not configured")
+	}
+	snapshot, err := service.fleet.ScopedSnapshot(ctx, "execution_subtree", program.RootTaskID, program.Limit)
+	if err != nil {
+		return ProgramView{}, fmt.Errorf("read program snapshot: %w", err)
+	}
+	rootPresent := false
+	laneTaskIDs := make([]string, 0, program.ExpectedLaneCount)
+	byStatus := make(map[string]int)
+	for _, task := range snapshot.Tasks {
+		if task.TaskID == program.RootTaskID {
+			rootPresent = true
+		}
+		byStatus[task.Status]++
+		if task.ParentID == program.RootTaskID && strings.HasPrefix(task.TaskID, program.LaneTaskIDPrefix) {
+			laneTaskIDs = append(laneTaskIDs, task.TaskID)
+		}
+	}
+	if !rootPresent {
+		return ProgramView{}, errors.New("program root is not present in its scoped snapshot")
+	}
+	sort.Strings(laneTaskIDs)
+	return ProgramView{
+		Program: *program, GeneratedAt: service.now().UTC(), ProjectID: snapshot.ProjectID,
+		Revision: snapshot.Revision, ReadTimestamp: snapshot.ReadTimestamp, StoreType: snapshot.StoreType,
+		Scope: snapshot.Scope, Collections: snapshot.Collections,
+		Counts: ProgramCounts{
+			Tasks: len(snapshot.Tasks), Lanes: len(laneTaskIDs), ExpectedLanes: program.ExpectedLaneCount,
+			LaneCountMatches: len(laneTaskIDs) == program.ExpectedLaneCount,
+			Dependencies:     len(snapshot.Dependencies), Worklinks: len(snapshot.Worklinks), ByStatus: byStatus,
+		},
+		LaneTaskIDs: laneTaskIDs, Tasks: snapshot.Tasks, Dependencies: snapshot.Dependencies, Worklinks: snapshot.Worklinks,
+	}, nil
+}
+
+func (service *Service) TaskPrompt(ctx context.Context, taskID string) (TaskPrompt, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || len(taskID) > 512 {
+		return TaskPrompt{}, errors.New("task_id is required")
+	}
+	type snapshotResult struct {
+		snapshot FleetSnapshot
+		err      error
+	}
+	type worklinksResult struct {
+		links []Worklink
+		err   error
+	}
+	snapshotChannel := make(chan snapshotResult, 1)
+	worklinksChannel := make(chan worklinksResult, 1)
+	go func() {
+		snapshot, err := service.fleet.ScopedSnapshot(ctx, "acceptance_dependency_closure", taskID, service.config.Fleet.TaskPromptLimit)
+		snapshotChannel <- snapshotResult{snapshot: snapshot, err: err}
+	}()
+	go func() {
+		links, err := service.fleet.Worklinks(ctx, taskID)
+		worklinksChannel <- worklinksResult{links: links, err: err}
+	}()
+	snapshotOutcome := <-snapshotChannel
+	if snapshotOutcome.err != nil {
+		return TaskPrompt{}, fmt.Errorf("read task context: %w", snapshotOutcome.err)
+	}
+	worklinksOutcome := <-worklinksChannel
+	if worklinksOutcome.err != nil {
+		return TaskPrompt{}, fmt.Errorf("read exact task worklinks: %w", worklinksOutcome.err)
+	}
+	var task *Task
+	for index := range snapshotOutcome.snapshot.Tasks {
+		if snapshotOutcome.snapshot.Tasks[index].TaskID == taskID {
+			task = &snapshotOutcome.snapshot.Tasks[index]
+			break
+		}
+	}
+	if task == nil {
+		return TaskPrompt{}, errors.New("task is not present in its scoped snapshot")
+	}
+
+	contextTasks := append([]Task(nil), snapshotOutcome.snapshot.Tasks...)
+	sort.SliceStable(contextTasks, func(i, j int) bool { return contextTasks[i].TaskID < contextTasks[j].TaskID })
+	dependencies := append([]Dependency(nil), snapshotOutcome.snapshot.Dependencies...)
+	sort.SliceStable(dependencies, func(i, j int) bool {
+		if dependencies[i].TaskID != dependencies[j].TaskID {
+			return dependencies[i].TaskID < dependencies[j].TaskID
+		}
+		return dependencies[i].DependsOnTaskID < dependencies[j].DependsOnTaskID
+	})
+	links := append([]Worklink(nil), worklinksOutcome.links...)
+	sort.SliceStable(links, func(i, j int) bool {
+		if links[i].ArtifactType != links[j].ArtifactType {
+			return links[i].ArtifactType < links[j].ArtifactType
+		}
+		return links[i].ArtifactRef < links[j].ArtifactRef
+	})
+
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "Execute fleet-plan task %s.\n\n", taskID)
+	builder.WriteString("TASK-GRAPH AUTHORITY — use this as the execution target\n")
+	fmt.Fprintf(&builder, "Project: %s\nRevision: %s\nRead timestamp: %s\n", snapshotOutcome.snapshot.ProjectID, snapshotOutcome.snapshot.Revision, snapshotOutcome.snapshot.ReadTimestamp)
+	var scope struct {
+		Capped          bool     `json:"capped"`
+		Complete        bool     `json:"complete"`
+		MembershipCount int      `json:"membership_count"`
+		MissingTaskIDs  []string `json:"missing_task_ids"`
+	}
+	if len(snapshotOutcome.snapshot.Scope) > 0 && json.Unmarshal(snapshotOutcome.snapshot.Scope, &scope) == nil {
+		fmt.Fprintf(&builder, "Context scope: acceptance_dependency_closure; complete=%t; capped=%t; membership=%d\n", scope.Complete, scope.Capped, scope.MembershipCount)
+		if len(scope.MissingTaskIDs) > 0 {
+			fmt.Fprintf(&builder, "Unresolved context task ids: %s\n", strings.Join(scope.MissingTaskIDs, ", "))
+		}
+	}
+	fmt.Fprintf(&builder, "\nTask id: %s\nTitle: %s\nStatus: %s\nOwner: %s\nPillar: %s\nLevel: %s\nParent: %s\nUpdated: %s\n", task.TaskID, task.Title, task.Status, task.Owner, task.Pillar, task.Level, task.ParentID, formatTime(task.UpdatedAt))
+	if task.Note != "" {
+		fmt.Fprintf(&builder, "Task contract / acceptance evidence:\n%s\n", task.Note)
+	}
+	if len(contextTasks) > 1 {
+		builder.WriteString("\nContext tasks:\n")
+		for _, candidate := range contextTasks {
+			if candidate.TaskID == taskID {
+				continue
+			}
+			fmt.Fprintf(&builder, "- %s [%s] %s; owner=%s; parent=%s\n", candidate.TaskID, candidate.Status, candidate.Title, candidate.Owner, candidate.ParentID)
+		}
+	}
+	if len(dependencies) > 0 {
+		builder.WriteString("Dependencies:\n")
+		for _, dependency := range dependencies {
+			fmt.Fprintf(&builder, "- %s -> %s (%s)\n", dependency.TaskID, dependency.DependsOnTaskID, dependency.Kind)
+		}
+	}
+	if len(links) > 0 {
+		builder.WriteString("Durable work links:\n")
+		for _, link := range links {
+			fmt.Fprintf(&builder, "- %s: %s", link.ArtifactType, link.ArtifactRef)
+			if link.Thread != "" {
+				fmt.Fprintf(&builder, " (thread %s)", link.Thread)
+			}
+			builder.WriteByte('\n')
+		}
+	}
+	builder.WriteString("\nKeep this exact task id as the stable work identity. Before creating a branch, worktree, or replacement task, inspect every durable work link above and resume an existing binding when one exists. Read any linked thread transcript or indexed history before acting. Verify current repository and live task state, then carry this task through its stated evidence and completion contract.")
+	return TaskPrompt{TaskID: taskID, GeneratedAt: service.now().UTC(), Text: builder.String()}, nil
 }
 
 func (service *Service) ResumePacket(ctx context.Context, taskID, sessionID string) (ResumePacket, error) {

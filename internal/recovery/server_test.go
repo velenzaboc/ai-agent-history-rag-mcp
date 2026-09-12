@@ -108,12 +108,37 @@ func TestServerReturnsExactTaskWorklinks(t *testing.T) {
 	}
 }
 
+func TestServerReturnsTaskPromptAndProgramView(t *testing.T) {
+	cfg := mustTestConfig(t)
+	application := stubApplication{
+		taskPrompt: TaskPrompt{TaskID: "T-1", Text: "execute T-1"},
+		program:    ProgramView{Program: cfg.Programs[0], Counts: ProgramCounts{Lanes: 2}},
+	}
+	server, err := NewServer(cfg, application, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for requestPath, expected := range map[string]string{
+		"/api/task/prompt?task_id=T-1": `"text":"execute T-1"`,
+		"/api/program?id=delivery":     `"lanes":2`,
+	} {
+		request := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("GET %s status=%d body=%s", requestPath, response.Code, response.Body.String())
+		}
+	}
+}
+
 type stubApplication struct {
-	dashboard Dashboard
-	search    HistoryBatch
-	worklinks TaskWorklinks
-	packet    ResumePacket
-	err       error
+	dashboard  Dashboard
+	search     HistoryBatch
+	worklinks  TaskWorklinks
+	packet     ResumePacket
+	taskPrompt TaskPrompt
+	program    ProgramView
+	err        error
 }
 
 func (s stubApplication) Dashboard(context.Context) (Dashboard, error) { return s.dashboard, s.err }
@@ -125,4 +150,10 @@ func (s stubApplication) Worklinks(context.Context, string) (TaskWorklinks, erro
 }
 func (s stubApplication) ResumePacket(context.Context, string, string) (ResumePacket, error) {
 	return s.packet, s.err
+}
+func (s stubApplication) TaskPrompt(context.Context, string) (TaskPrompt, error) {
+	return s.taskPrompt, s.err
+}
+func (s stubApplication) Program(context.Context, string) (ProgramView, error) {
+	return s.program, s.err
 }

@@ -19,6 +19,7 @@
     "root_task_id": "",
     "limit": 1000,
     "active_limit": 2000,
+    "task_prompt_limit": 500,
     "max_response_bytes": 134217728
   },
   "history": {
@@ -109,6 +110,39 @@
       }
     ]
   },
+  "programs": [
+    {
+      "id": "delivery",
+      "nav_label": "Delivery program",
+      "title": "Delivery program",
+      "description": "A live task-graph subtree grouped into configured execution lanes.",
+      "root_task_id": "replace-program-root",
+      "lane_task_id_prefix": "LANE-",
+      "expected_lane_count": 1,
+      "limit": 5000,
+      "source_thread_title": "",
+      "source_thread_id": "",
+      "source_note": "",
+      "checkpoint_ref": "",
+      "stages": [
+        {
+          "id": "plan",
+          "label": "Plan",
+          "task_id_prefix": "PLAN-"
+        },
+        {
+          "id": "validate",
+          "label": "Validate",
+          "task_id_prefix": "VALIDATE-"
+        },
+        {
+          "id": "activate",
+          "label": "Activate",
+          "task_id_prefix": "ACTIVATE-"
+        }
+      ]
+    }
+  ],
   "status": {
     "groups": [
       {
@@ -158,12 +192,13 @@
     "summary_preview_characters": 520,
     "labels": {
       "inbox": "Recovery inbox",
-      "lanes": "Work lanes",
+      "lanes": "KANBAN",
       "tasks": "Task inventory",
       "milestones": "Milestones",
       "graph": "Dependency graph",
       "history_search": "AI history search",
       "copy_resume": "Copy restart prompt",
+      "copy_task_prompt": "Copy task prompt",
       "sources": "Live sources"
     },
     "theme": {

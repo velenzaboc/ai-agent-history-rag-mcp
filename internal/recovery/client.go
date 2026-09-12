@@ -20,6 +20,7 @@ var ErrSessionNotFound = errors.New("session history was not returned")
 
 type FleetSource interface {
 	Snapshot(context.Context) (FleetSnapshot, error)
+	ScopedSnapshot(context.Context, string, string, int) (FleetSnapshot, error)
 	Worklinks(context.Context, string) ([]Worklink, error)
 }
 
@@ -130,6 +131,30 @@ func (client *MCPFleetClient) Snapshot(ctx context.Context) (FleetSnapshot, erro
 		return FleetSnapshot{}, err
 	}
 	return snapshotOutcome.snapshot, nil
+}
+
+func (client *MCPFleetClient) ScopedSnapshot(ctx context.Context, scope, rootTaskID string, limit int) (FleetSnapshot, error) {
+	scope = strings.TrimSpace(scope)
+	rootTaskID = strings.TrimSpace(rootTaskID)
+	if (scope != "execution_subtree" && scope != "acceptance_dependency_closure") || rootTaskID == "" || len(rootTaskID) > 512 {
+		return FleetSnapshot{}, errors.New("scoped snapshot request is invalid")
+	}
+	if limit < 1 || limit > 100000 {
+		return FleetSnapshot{}, errors.New("scoped snapshot limit is invalid")
+	}
+	var snapshot FleetSnapshot
+	if err := client.callTool(ctx, client.config.SnapshotTool, map[string]any{
+		"project_id":   client.config.ProjectID,
+		"scope":        scope,
+		"root_task_id": rootTaskID,
+		"limit":        limit,
+	}, &snapshot); err != nil {
+		return FleetSnapshot{}, err
+	}
+	if err := client.finishSnapshot(&snapshot, nil); err != nil {
+		return FleetSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 type taskListResult struct {

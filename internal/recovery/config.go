@@ -35,6 +35,7 @@ type Config struct {
 	History                HistoryConfig        `json:"history"`
 	Matching               MatchingConfig       `json:"matching"`
 	Classification         ClassificationConfig `json:"classification"`
+	Programs               []ProgramConfig      `json:"programs"`
 	Status                 StatusConfig         `json:"status"`
 	View                   ViewConfig           `json:"view"`
 }
@@ -55,7 +56,30 @@ type FleetConfig struct {
 	RootTaskID       string `json:"root_task_id"`
 	Limit            int    `json:"limit"`
 	ActiveLimit      int    `json:"active_limit"`
+	TaskPromptLimit  int    `json:"task_prompt_limit"`
 	MaxResponseBytes int64  `json:"max_response_bytes"`
+}
+
+type ProgramConfig struct {
+	ID                string               `json:"id"`
+	NavLabel          string               `json:"nav_label"`
+	Title             string               `json:"title"`
+	Description       string               `json:"description"`
+	RootTaskID        string               `json:"root_task_id"`
+	LaneTaskIDPrefix  string               `json:"lane_task_id_prefix"`
+	ExpectedLaneCount int                  `json:"expected_lane_count"`
+	Limit             int                  `json:"limit"`
+	SourceThreadTitle string               `json:"source_thread_title"`
+	SourceThreadID    string               `json:"source_thread_id"`
+	SourceNote        string               `json:"source_note"`
+	CheckpointRef     string               `json:"checkpoint_ref"`
+	Stages            []ProgramStageConfig `json:"stages"`
+}
+
+type ProgramStageConfig struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	TaskIDPrefix string `json:"task_id_prefix"`
 }
 
 type HistoryConfig struct {
@@ -246,6 +270,9 @@ func (cfg Config) validate() error {
 	if err := cfg.Classification.validate(); err != nil {
 		return fmt.Errorf("classification: %w", err)
 	}
+	if err := validatePrograms(cfg.Programs); err != nil {
+		return fmt.Errorf("programs: %w", err)
+	}
 	if err := cfg.Status.validate(); err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
@@ -281,7 +308,43 @@ func (cfg FleetConfig) validate() error {
 	} else if !identifierPattern.MatchString(cfg.TasksTool) || cfg.ActiveLimit < 1 || cfg.ActiveLimit > 100000 {
 		return errors.New("tasks_tool and active_limit must define a valid active-task overlay")
 	}
+	if cfg.TaskPromptLimit < 1 || cfg.TaskPromptLimit > 100000 {
+		return errors.New("task_prompt_limit must be between 1 and 100000")
+	}
 	return validateResponseLimit(cfg.MaxResponseBytes)
+}
+
+func validatePrograms(programs []ProgramConfig) error {
+	seenPrograms := make(map[string]struct{}, len(programs))
+	for _, program := range programs {
+		if !identifierPattern.MatchString(program.ID) {
+			return errors.New("program id is invalid")
+		}
+		if _, exists := seenPrograms[program.ID]; exists {
+			return errors.New("program ids must be unique")
+		}
+		seenPrograms[program.ID] = struct{}{}
+		if strings.TrimSpace(program.NavLabel) == "" || strings.TrimSpace(program.Title) == "" || strings.TrimSpace(program.Description) == "" || strings.TrimSpace(program.RootTaskID) == "" || strings.TrimSpace(program.LaneTaskIDPrefix) == "" {
+			return fmt.Errorf("program %s requires nav_label, title, description, root_task_id, and lane_task_id_prefix", program.ID)
+		}
+		if len(program.NavLabel) > 128 || len(program.Title) > 512 || len(program.Description) > 10000 || len(program.RootTaskID) > 512 || len(program.LaneTaskIDPrefix) > 512 || len(program.SourceThreadTitle) > 512 || len(program.SourceThreadID) > 512 || len(program.SourceNote) > 10000 || len(program.CheckpointRef) > 10000 {
+			return fmt.Errorf("program %s contains an oversized value", program.ID)
+		}
+		if program.ExpectedLaneCount < 1 || program.ExpectedLaneCount > 10000 || program.Limit < 1 || program.Limit > 100000 {
+			return fmt.Errorf("program %s expected_lane_count or limit is outside the supported bounds", program.ID)
+		}
+		seenStages := make(map[string]struct{}, len(program.Stages))
+		for _, stage := range program.Stages {
+			if !identifierPattern.MatchString(stage.ID) || strings.TrimSpace(stage.Label) == "" || strings.TrimSpace(stage.TaskIDPrefix) == "" || len(stage.Label) > 128 || len(stage.TaskIDPrefix) > 512 {
+				return fmt.Errorf("program %s contains an invalid stage", program.ID)
+			}
+			if _, exists := seenStages[stage.ID]; exists {
+				return fmt.Errorf("program %s stage ids must be unique", program.ID)
+			}
+			seenStages[stage.ID] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func (cfg HistoryConfig) validate() error {
@@ -442,7 +505,7 @@ func (cfg ViewConfig) validate() error {
 			return errors.New("theme colors must be six-digit hex values")
 		}
 	}
-	for _, key := range []string{"inbox", "lanes", "tasks", "milestones", "graph", "history_search", "copy_resume", "sources"} {
+	for _, key := range []string{"inbox", "lanes", "tasks", "milestones", "graph", "history_search", "copy_resume", "copy_task_prompt", "sources"} {
 		if strings.TrimSpace(cfg.Labels[key]) == "" {
 			return fmt.Errorf("view label %s is required", key)
 		}

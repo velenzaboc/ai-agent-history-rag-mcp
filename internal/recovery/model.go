@@ -156,6 +156,7 @@ type Dashboard struct {
 	View           ViewConfig           `json:"view"`
 	Status         StatusConfig         `json:"status"`
 	Classification ClassificationConfig `json:"classification"`
+	Programs       []ProgramConfig      `json:"programs"`
 	Counts         DashboardCounts      `json:"counts"`
 	Sources        []SourceStatus       `json:"sources"`
 	Tasks          []Task               `json:"tasks"`
@@ -182,4 +183,36 @@ type ResumePacket struct {
 	SessionID   string    `json:"session_id"`
 	GeneratedAt time.Time `json:"generated_at"`
 	Text        string    `json:"text"`
+}
+
+type TaskPrompt struct {
+	TaskID      string    `json:"task_id"`
+	GeneratedAt time.Time `json:"generated_at"`
+	Text        string    `json:"text"`
+}
+
+type ProgramCounts struct {
+	Tasks            int            `json:"tasks"`
+	Lanes            int            `json:"lanes"`
+	ExpectedLanes    int            `json:"expected_lanes"`
+	LaneCountMatches bool           `json:"lane_count_matches"`
+	Dependencies     int            `json:"dependencies"`
+	Worklinks        int            `json:"worklinks"`
+	ByStatus         map[string]int `json:"by_status"`
+}
+
+type ProgramView struct {
+	Program       ProgramConfig   `json:"program"`
+	GeneratedAt   time.Time       `json:"generated_at"`
+	ProjectID     string          `json:"project_id"`
+	Revision      string          `json:"revision"`
+	ReadTimestamp string          `json:"read_timestamp"`
+	StoreType     string          `json:"store_type"`
+	Scope         json.RawMessage `json:"scope,omitempty"`
+	Collections   map[string]any  `json:"collections,omitempty"`
+	Counts        ProgramCounts   `json:"counts"`
+	LaneTaskIDs   []string        `json:"lane_task_ids"`
+	Tasks         []Task          `json:"tasks"`
+	Dependencies  []Dependency    `json:"dependencies"`
+	Worklinks     []Worklink      `json:"worklinks"`
 }

@@ -1,6 +1,6 @@
 "use strict";
 
-const state = {dashboard:null, view:"recovery", query:"", findingKind:"all", selectedTask:"", selectedSession:"", detailEpoch:0, loading:false};
+const state = {dashboard:null, programs:new Map(), programLoading:new Set(), view:"recovery", query:"", findingKind:"all", selectedTask:"", selectedSession:"", detailEpoch:0, loading:false};
 const $ = (selector, root=document) => root.querySelector(selector);
 const $$ = (selector, root=document) => [...root.querySelectorAll(selector)];
 const svgNS = "http://www.w3.org/2000/svg";
@@ -18,9 +18,11 @@ function el(tag, className, value) { const node=document.createElement(tag); if(
 function svgEl(tag, attributes={}) { const node=document.createElementNS(svgNS,tag); Object.entries(attributes).forEach(([key,value])=>node.setAttribute(key,String(value))); return node; }
 
 function bindNavigation() {
-  $$(".nav-item").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
+  $$(".nav-item").forEach(bindNavigationButton);
   $("#global-filter").addEventListener("input", event => { state.query=event.target.value.trim().toLowerCase(); renderActiveView(); });
 }
+
+function bindNavigationButton(button) { button.addEventListener("click", () => setView(button.dataset.view)); }
 
 function bindActions() {
   $("#refresh-button").addEventListener("click", () => loadDashboard(true));
@@ -45,6 +47,7 @@ async function loadDashboard(fresh) {
     const response=await fetch(apiURL(`api/dashboard${fresh?"?fresh=1":""}`),{headers:{Accept:"application/json"}});
     if(!response.ok) throw new Error(`Dashboard request returned ${response.status}`);
     state.dashboard=await response.json();
+    if(fresh) state.programs.clear();
     configureShell();
     renderEverything();
   } catch(error) {
@@ -61,6 +64,16 @@ function configureShell() {
   text($("#project-id"),data.project_id);
   text($("#revision"),data.revision || data.read_timestamp || "unversioned");
   $$('[data-label]').forEach(node => text(node,label(node.dataset.label,node.textContent)));
+  renderProgramNavigation();
+}
+
+function renderProgramNavigation() {
+  const host=$("#program-nav");host.replaceChildren();
+  (state.dashboard?.programs||[]).forEach(program=>{
+    const button=el("button",`nav-item ${state.view===`program:${program.id}`?"active":""}`);button.type="button";button.dataset.view=`program:${program.id}`;
+    button.append(text(el("span","nav-glyph"),"◫"),text(el("span"),program.nav_label),text(el("span","nav-count"),number(program.expected_lane_count)));
+    bindNavigationButton(button);host.append(button);
+  });
 }
 
 function renderEverything() {
@@ -70,15 +83,19 @@ function renderEverything() {
 function setView(view) {
   state.view=view;
   $$(".nav-item").forEach(item => item.classList.toggle("active",item.dataset.view===view));
-  $$(".view-panel").forEach(panel => panel.classList.toggle("active",panel.dataset.panel===view));
+  const panelView=view.startsWith("program:")?"program":view;
+  $$(".view-panel").forEach(panel => panel.classList.toggle("active",panel.dataset.panel===panelView));
   const titles={recovery:label("inbox","Recovery inbox"),lanes:label("lanes","Lanes"),tasks:label("tasks","Tasks"),milestones:label("milestones","Milestones"),graph:label("graph","Graph"),search:label("history_search","History search")};
-  text($("#view-title"),titles[view] || view);
+  const program=view.startsWith("program:")?(state.dashboard?.programs||[]).find(item=>item.id===view.slice(8)):null;
+  text($("#view-title"),program?.title||titles[view]||view);
   text($("#view-eyebrow"),state.dashboard?.view?.eyebrow || "Overview");
+  text($("#view-subtitle"),program?.description||state.dashboard?.view?.subtitle||"");
   renderActiveView();
 }
 
 function renderActiveView() {
   if(!state.dashboard) return;
+  if(state.view.startsWith("program:")){renderProgramView(state.view.slice(8));return;}
   ({recovery:renderFindings,lanes:renderLanes,tasks:renderTasks,milestones:renderMilestones,graph:renderGraph,search:()=>{}}[state.view] || (()=>{}))();
 }
 
@@ -112,6 +129,48 @@ function renderFindingFilters() {
   const options=[{id:"all",label:"All"},{id:"high",label:"High signal"},...state.dashboard.classification.rules.map(rule=>({id:rule.id,label:rule.label}))];
   options.forEach(option=>{const button=text(el("button",`filter-chip ${state.findingKind===option.id?"active":""}`),option.label);button.type="button";button.addEventListener("click",()=>{state.findingKind=option.id;renderFindingFilters();renderFindings();});host.append(button);});
 }
+
+async function renderProgramView(programID) {
+  const host=$("#program-view");
+  const cached=state.programs.get(programID);
+  if(cached){paintProgramView(cached);return;}
+  if(state.programLoading.has(programID))return;
+  state.programLoading.add(programID);host.replaceChildren(text(el("div","program-loading"),"Loading the live program subtree…"));
+  try{
+    const query=new URLSearchParams({id:programID});const response=await fetch(apiURL(`api/program?${query}`),{headers:{Accept:"application/json"}});
+    if(!response.ok)throw new Error(`Program view returned ${response.status}`);
+    const program=await response.json();state.programs.set(programID,program);
+    if(state.view===`program:${programID}`)paintProgramView(program);
+  }catch(error){if(state.view===`program:${programID}`)host.replaceChildren(text(el("div","empty-state"),error.message||"Program unavailable"));}
+  finally{state.programLoading.delete(programID);}
+}
+
+function paintProgramView(data) {
+  const host=$("#program-view");host.replaceChildren();const config=data.program;const taskMap=mapBy(data.tasks||[],"task_id");const byParent=groupBy((data.tasks||[]).filter(task=>task.parent_id),"parent_id");const laneRoots=(data.lane_task_ids||[]).map(id=>taskMap[id]).filter(Boolean);
+  const hero=el("section","program-hero");const heading=el("div","program-hero-copy");heading.append(text(el("div","eyebrow"),config.nav_label),text(el("h2"),config.title),text(el("p"),config.description));
+  const health=el("div",`program-health ${data.counts.lane_count_matches&&data.scope?.complete&&!data.scope?.capped?"complete":"partial"}`);health.append(text(el("strong"),`${number(data.counts.lanes)} / ${number(data.counts.expected_lanes)}`),text(el("span"),"configured lanes"));hero.append(heading,health);host.append(hero);
+  const facts=el("section","program-facts");facts.append(programFact("Tasks",number(data.counts.tasks)),programFact("Dependencies",number(data.counts.dependencies)),programFact("Work links",number(data.counts.worklinks)),programFact("Snapshot",data.scope?.complete&&!data.scope?.capped?"complete":"bounded"),programFact("Read",formatTime(data.read_timestamp)));
+  if(config.source_thread_title||config.source_thread_id||config.checkpoint_ref){const source=el("article","program-source");source.append(text(el("div","eyebrow"),"Source handover"),text(el("h3"),config.source_thread_title||"Configured source thread"));if(config.source_thread_id)source.append(text(el("div","work-id"),config.source_thread_id));if(config.source_note)source.append(text(el("p"),config.source_note));if(config.checkpoint_ref)source.append(text(el("div","program-checkpoint"),`Checkpoint: ${config.checkpoint_ref}`));facts.append(source);}
+  host.append(facts);
+  const filtered=laneRoots.filter(lane=>{const members=[lane,...descendantsOf(lane.task_id,byParent)];return !state.query||members.some(taskMatches);});
+  const grid=el("section","program-lane-grid");filtered.forEach((lane,index)=>grid.append(programLaneCard(data,lane,index,byParent)));host.append(grid);
+  if(!filtered.length)host.append(text(el("div","empty-state"),"No program lanes match this filter."));
+}
+
+function programFact(labelText,value){const fact=el("div","program-fact");fact.append(text(el("span"),labelText),text(el("strong"),value));return fact;}
+
+function descendantsOf(taskID,byParent){const result=[];const stack=[...(byParent[taskID]||[])];const seen=new Set();while(stack.length){const task=stack.shift();if(!task||seen.has(task.task_id))continue;seen.add(task.task_id);result.push(task);stack.push(...(byParent[task.task_id]||[]));}return result;}
+
+function programLaneCard(data,lane,index,byParent){
+  const descendants=descendantsOf(lane.task_id,byParent),members=[lane,...descendants],terminal=new Set(state.dashboard.status.terminal_group_ids),complete=members.filter(task=>terminal.has(groupForStatus(task.status)?.id)).length,percent=members.length?Math.round(complete/members.length*100):0;
+  const card=el("article","program-lane-card");card.style.setProperty("--lane-index",String(index));const head=el("div","program-lane-head");const identity=el("div");identity.append(text(el("div","task-card-id"),lane.task_id),text(el("h3"),lane.title));const status=text(el("span","pill"),lane.status);const group=groupForStatus(lane.status);if(group)status.style.color=group.color;head.append(identity,status);card.append(head);
+  const meta=el("div","program-lane-meta");meta.append(text(el("span"),lane.owner||"unowned"),text(el("span"),`${number(members.length)} tasks · ${number(complete)} terminal`));card.append(meta);
+  const track=el("div","progress-track"),fill=el("div","progress-fill");fill.style.width=`${percent}%`;track.append(fill);const caption=el("div","progress-caption");caption.append(text(el("span"),"subtree progress"),text(el("span"),`${percent}%`));card.append(track,caption);
+  if((data.program.stages||[]).length){const stages=el("div","program-stages");data.program.stages.forEach(stage=>{const matches=descendants.filter(task=>task.task_id.startsWith(stage.task_id_prefix));const selected=matches.sort((a,b)=>String(a.task_id).localeCompare(String(b.task_id)))[0];const chip=el("div","program-stage");chip.append(text(el("span"),stage.label),text(el("strong"),selected?.status||"not present"));if(selected){chip.addEventListener("click",event=>{event.stopPropagation();openTask(selected.task_id);});const selectedGroup=groupForStatus(selected.status);if(selectedGroup)chip.style.setProperty("--stage-color",selectedGroup.color);}stages.append(chip);});card.append(stages);}
+  const focus=descendants.filter(task=>!terminal.has(groupForStatus(task.status)?.id)).sort(programTaskOrder).slice(0,4);const list=el("div","program-focus-list");(focus.length?focus:descendants.sort(programTaskOrder).slice(0,4)).forEach(task=>{const row=el("button","program-focus-task");row.type="button";row.append(text(el("span"),task.title),text(el("small"),task.status));row.addEventListener("click",event=>{event.stopPropagation();openTask(task.task_id);});list.append(row);});card.append(list);card.addEventListener("click",()=>openTask(lane.task_id));return card;
+}
+
+function programTaskOrder(a,b){const rank={blocked:0,in_progress:1,in_review:2,not_started:3,done:4,complete:4,completed:4,resolved:4,cancelled:5};return (rank[a.status]??3)-(rank[b.status]??3)||String(a.task_id).localeCompare(String(b.task_id));}
 
 function renderFindings() {
   const tbody=$("#findings-body"); tbody.replaceChildren();
@@ -173,9 +232,11 @@ function renderSearchResults(sessions) {const host=$("#search-results");host.rep
 function openEvidence(taskID,sessionID,finding){if(taskID)openTask(taskID,sessionID,finding);else{const session=state.dashboard.sessions.find(item=>item.session_id===sessionID);openSession(session,finding);}}
 
 function openTask(taskID,sessionID="",finding=null) {
-  const task=state.dashboard.tasks.find(item=>item.task_id===taskID);if(!task)return;const epoch=++state.detailEpoch;state.selectedTask=taskID;state.selectedSession=sessionID;const links=state.dashboard.worklinks.filter(item=>item.task_id===taskID),deps=state.dashboard.dependencies.filter(item=>item.task_id===taskID||item.depends_on_task_id===taskID),relationships=state.dashboard.relationships.filter(item=>item.task_id===taskID),relatedSessions=relationships.map(rel=>state.dashboard.sessions.find(item=>item.session_id===rel.session_id)).filter(Boolean);const chosen=sessionID||relationships.find(rel=>rel.kind!=="suggested")?.session_id||"";
+  const dataset=taskDataset(taskID),task=dataset?.tasks?.find(item=>item.task_id===taskID);if(!task)return;const epoch=++state.detailEpoch;state.selectedTask=taskID;state.selectedSession=sessionID;const links=(dataset.worklinks||[]).filter(item=>item.task_id===taskID),deps=(dataset.dependencies||[]).filter(item=>item.task_id===taskID||item.depends_on_task_id===taskID),relationships=state.dashboard.relationships.filter(item=>item.task_id===taskID),relatedSessions=relationships.map(rel=>state.dashboard.sessions.find(item=>item.session_id===rel.session_id)).filter(Boolean);const chosen=sessionID||relationships.find(rel=>rel.kind!=="suggested")?.session_id||"";
   text($("#drawer-eyebrow"),finding?.label||task.status);text($("#drawer-title"),task.title);const body=$("#drawer-body");body.replaceChildren(detailSection("Task",detailGrid({ID:task.task_id,Status:task.status,Owner:task.owner||"—",Pillar:task.pillar||"—",Level:task.level,Parent:task.parent_id||"—",Projection:task.projection||"snapshot",Updated:formatTime(task.updated_at)})));if(task.note)body.append(detailSection("Note",text(el("div","summary-block"),task.note)));const worklinksSection=detailSection("Durable work links (snapshot)",relatedList(links.map(formatWorklink)));body.append(worklinksSection,detailSection("Dependencies",relatedList(deps.map(dep=>`${dep.task_id} → ${dep.depends_on_task_id} · ${dep.kind}`))),detailSection("Related history",relatedList(relatedSessions.map(session=>`${session.session_id} · ${session.machine_id||"unknown"} · ${relativeTime(session.timestamp)}`))));setDrawerActions(task.task_id,chosen);openDrawer();refreshExactWorklinks(taskID,worklinksSection,epoch);
 }
+
+function taskDataset(taskID){const activeID=state.view.startsWith("program:")?state.view.slice(8):"";const active=activeID?state.programs.get(activeID):null;if(active?.tasks?.some(task=>task.task_id===taskID))return active;for(const program of state.programs.values())if(program.tasks?.some(task=>task.task_id===taskID))return program;return state.dashboard;}
 
 async function refreshExactWorklinks(taskID,section,epoch){try{const query=new URLSearchParams({task_id:taskID});const response=await fetch(apiURL(`api/task/worklinks?${query}`),{headers:{Accept:"application/json"}});if(!response.ok)throw new Error(`Exact work links returned ${response.status}`);const result=await response.json();if(state.detailEpoch!==epoch||state.selectedTask!==taskID)return;text($("h3",section),"Durable work links (exact)");$(".related-list",section).replaceWith(relatedList((result.worklinks||[]).map(formatWorklink)));}catch(error){if(state.detailEpoch===epoch)showToast(error.message||"Exact work links unavailable");}}
 
@@ -183,7 +244,9 @@ function formatWorklink(link){return `${link.artifact_type}: ${link.artifact_ref
 
 function openSession(session,finding=null){if(!session)return;++state.detailEpoch;state.selectedTask="";state.selectedSession=session.session_id;text($("#drawer-eyebrow"),finding?.label||session.chunk_type||"History evidence");text($("#drawer-title"),session.project_name||session.session_id);const relation=state.dashboard?.relationships?.find(item=>item.session_id===session.session_id&&item.kind!=="suggested");const body=$("#drawer-body");body.replaceChildren(detailSection("Session",detailGrid({ID:session.session_id,Project:session.project_name||"—",Path:session.project_path||"—",Machine:session.machine_id||"—",Recorded:formatTime(session.timestamp),Match:relation?`${relation.kind} · ${relation.score}`:"unbound"})),detailSection("History evidence",text(el("div","summary-block"),session.summary||"No content returned.")));setDrawerActions(relation?.task_id||"",session.session_id);openDrawer();}
 
-function setDrawerActions(taskID,sessionID){const actions=$("#drawer-actions");actions.replaceChildren();if(sessionID){const copy=text(el("button","button primary"),label("copy_resume","Copy resume packet"));copy.addEventListener("click",()=>copyResume(taskID,sessionID,copy));actions.append(copy);}const close=text(el("button","button secondary"),"Close");close.addEventListener("click",closeDrawer);actions.append(close);}
+function setDrawerActions(taskID,sessionID){const actions=$("#drawer-actions");actions.replaceChildren();if(taskID){const copyTask=text(el("button",`button ${sessionID?"secondary":"primary"}`),label("copy_task_prompt","Copy task prompt"));copyTask.addEventListener("click",()=>copyTaskPrompt(taskID,copyTask));actions.append(copyTask);}if(sessionID){const copy=text(el("button","button primary"),label("copy_resume","Copy resume packet"));copy.addEventListener("click",()=>copyResume(taskID,sessionID,copy));actions.append(copy);}const close=text(el("button","button secondary"),"Close");close.addEventListener("click",closeDrawer);actions.append(close);}
+
+async function copyTaskPrompt(taskID,button){button.disabled=true;text(button,"Building prompt…");try{const query=new URLSearchParams({task_id:taskID});const response=await fetch(apiURL(`api/task/prompt?${query}`),{headers:{Accept:"application/json"}});if(!response.ok)throw new Error(`Task prompt returned ${response.status}`);const prompt=await response.json();await navigator.clipboard.writeText(prompt.text);showToast("Task prompt copied");text(button,"Copied");setTimeout(()=>text(button,label("copy_task_prompt","Copy task prompt")),1200);}catch(error){showToast(error.message||"Copy unavailable");text(button,label("copy_task_prompt","Copy task prompt"));}finally{button.disabled=false;}}
 
 async function copyResume(taskID,sessionID,button){button.disabled=true;text(button,"Building packet…");try{const query=new URLSearchParams({task_id:taskID,session_id:sessionID});const response=await fetch(apiURL(`api/resume?${query}`),{headers:{Accept:"application/json"}});if(!response.ok)throw new Error(`Resume packet returned ${response.status}`);const packet=await response.json();await navigator.clipboard.writeText(packet.text);showToast("Resume packet copied");text(button,"Copied");setTimeout(()=>text(button,label("copy_resume","Copy resume packet")),1200);}catch(error){showToast(error.message||"Copy unavailable");text(button,label("copy_resume","Copy resume packet"));}finally{button.disabled=false;}}
 

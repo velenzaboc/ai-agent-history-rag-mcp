@@ -18,10 +18,11 @@ model. The daemon has no local-storage or unauthenticated production mode.
 ## Work recovery console
 
 The repository also includes a config-driven, read-only browser console that
-joins task-graph state to AI history evidence. It surfaces status lanes,
-hierarchy and dependency graphs, milestones, abandoned or unlinked sessions,
-history search, and copyable history-first restart prompts without creating a
-second work-state store.
+joins task-graph state to AI history evidence. It surfaces a KANBAN view,
+config-driven program subtree pages, hierarchy and dependency graphs,
+milestones, abandoned or unlinked sessions, history search, copyable
+history-first restart prompts, and task prompts that need no session match—all
+without creating a second work-state store.
 
 See [Work Recovery Console](docs/WORK_RECOVERY_CONSOLE.md) and the
 [complete example configuration](configs/work-recovery-console.example.json).

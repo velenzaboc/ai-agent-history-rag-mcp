@@ -23,6 +23,7 @@
       <nav class="primary-nav" aria-label="Console views">
         <button class="nav-item active" data-view="recovery"><span class="nav-glyph">⌁</span><span data-label="inbox">Recovery inbox</span><span class="nav-count" id="inbox-count">–</span></button>
         <button class="nav-item" data-view="lanes"><span class="nav-glyph">▥</span><span data-label="lanes">Lanes</span></button>
+        <div class="program-nav" id="program-nav"></div>
         <button class="nav-item" data-view="tasks"><span class="nav-glyph">≡</span><span data-label="tasks">Tasks</span></button>
         <button class="nav-item" data-view="milestones"><span class="nav-glyph">◇</span><span data-label="milestones">Milestones</span></button>
         <button class="nav-item" data-view="graph"><span class="nav-glyph">⌘</span><span data-label="graph">Graph</span></button>
@@ -77,6 +78,10 @@
       <section class="view-panel" data-panel="lanes">
         <div class="panel-heading"><div><h2 data-label="lanes">Lanes</h2><p>Task state grouped by the configured status registry.</p></div></div>
         <div class="lane-board" id="lane-board"></div>
+      </section>
+
+      <section class="view-panel" data-panel="program">
+        <div class="program-view" id="program-view"></div>
       </section>
 
       <section class="view-panel" data-panel="tasks">

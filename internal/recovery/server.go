@@ -26,6 +26,8 @@ type Application interface {
 	Search(context.Context, HistorySearch) (HistoryBatch, error)
 	Worklinks(context.Context, string) (TaskWorklinks, error)
 	ResumePacket(context.Context, string, string) (ResumePacket, error)
+	TaskPrompt(context.Context, string) (TaskPrompt, error)
+	Program(context.Context, string) (ProgramView, error)
 }
 
 type Server struct {
@@ -70,7 +72,9 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+server.route("api/dashboard"), server.serveDashboard)
 	mux.HandleFunc("POST "+server.route("api/history/search"), server.serveSearch)
 	mux.HandleFunc("GET "+server.route("api/task/worklinks"), server.serveWorklinks)
+	mux.HandleFunc("GET "+server.route("api/task/prompt"), server.serveTaskPrompt)
 	mux.HandleFunc("GET "+server.route("api/resume"), server.serveResume)
+	mux.HandleFunc("GET "+server.route("api/program"), server.serveProgram)
 	return server.fixedHeaders(server.authenticate(mux))
 }
 
@@ -84,6 +88,36 @@ func (server *Server) serveWorklinks(response http.ResponseWriter, request *http
 	if err != nil {
 		server.logger.Printf("task worklinks failed: %v", err)
 		server.writeError(response, http.StatusBadGateway, "task_worklinks_unavailable")
+		return
+	}
+	server.writeJSON(response, http.StatusOK, result)
+}
+
+func (server *Server) serveTaskPrompt(response http.ResponseWriter, request *http.Request) {
+	taskID := strings.TrimSpace(request.URL.Query().Get("task_id"))
+	if len(taskID) > 512 || taskID == "" {
+		server.writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	result, err := server.app.TaskPrompt(request.Context(), taskID)
+	if err != nil {
+		server.logger.Printf("task prompt failed: %v", err)
+		server.writeError(response, http.StatusBadGateway, "task_prompt_unavailable")
+		return
+	}
+	server.writeJSON(response, http.StatusOK, result)
+}
+
+func (server *Server) serveProgram(response http.ResponseWriter, request *http.Request) {
+	programID := strings.TrimSpace(request.URL.Query().Get("id"))
+	if len(programID) > 64 || !identifierPattern.MatchString(programID) {
+		server.writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	result, err := server.app.Program(request.Context(), programID)
+	if err != nil {
+		server.logger.Printf("program view failed: %v", err)
+		server.writeError(response, http.StatusBadGateway, "program_unavailable")
 		return
 	}
 	server.writeJSON(response, http.StatusOK, result)

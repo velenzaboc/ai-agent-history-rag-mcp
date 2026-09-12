@@ -19,7 +19,7 @@ func TestMCPFleetClientParsesStreamableHTTPEvent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", Scope: "project", Limit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", Scope: "project", Limit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestMCPFleetClientOverlaysActiveTasksOutsideBoundedSnapshot(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", TasksTool: "tasks", WorklinksTool: "worklinks", Scope: "project", Limit: 1, ActiveLimit: 10, MaxResponseBytes: 1 << 20}, []string{"in_progress", "blocked"}, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", TasksTool: "tasks", WorklinksTool: "worklinks", Scope: "project", Limit: 1, ActiveLimit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, []string{"in_progress", "blocked"}, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestMCPFleetClientLoadsExactTaskWorklinks(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", Scope: "project", Limit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", Scope: "project", Limit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +107,39 @@ func TestMCPFleetClientLoadsExactTaskWorklinks(t *testing.T) {
 	}
 	if len(links) != 1 || links[0].ArtifactID != "A-1" {
 		t.Fatalf("unexpected exact worklinks: %#v", links)
+	}
+}
+
+func TestMCPFleetClientLoadsConfiguredScopedSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID     int64 `json:"id"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Params.Name != "snapshot" || request.Params.Arguments["scope"] != "execution_subtree" || request.Params.Arguments["root_task_id"] != "ROOT-1" || request.Params.Arguments["limit"] != float64(250) {
+			t.Fatalf("unexpected scoped snapshot request: %#v", request.Params)
+		}
+		result := FleetSnapshot{ProjectID: "project-a", Revision: "r-program", Tasks: []Task{{ProjectID: "project-a", TaskID: "ROOT-1"}}}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"structuredContent": result}})
+	}))
+	defer server.Close()
+
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", Scope: "project", Limit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.ScopedSnapshot(context.Background(), "execution_subtree", "ROOT-1", 250)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Revision != "r-program" || snapshot.SnapshotTasks != 1 {
+		t.Fatalf("unexpected scoped snapshot: %#v", snapshot)
 	}
 }
 
