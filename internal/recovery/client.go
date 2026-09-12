@@ -22,6 +22,7 @@ type FleetSource interface {
 	Snapshot(context.Context) (FleetSnapshot, error)
 	ScopedSnapshot(context.Context, string, string, int) (FleetSnapshot, error)
 	Worklinks(context.Context, string) ([]Worklink, error)
+	Search(context.Context, string, int) ([]Task, error)
 }
 
 func (client *MCPFleetClient) Worklinks(ctx context.Context, taskID string) ([]Worklink, error) {
@@ -47,6 +48,58 @@ func (client *MCPFleetClient) Worklinks(ctx context.Context, taskID string) ([]W
 		}
 	}
 	return result.Worklinks, nil
+}
+
+func (client *MCPFleetClient) Search(ctx context.Context, query string, limit int) ([]Task, error) {
+	query = strings.TrimSpace(query)
+	if query == "" || len(query) > 10000 || limit < 1 || limit > 100 {
+		return nil, errors.New("task search request is invalid")
+	}
+	var result struct {
+		Nodes []struct {
+			NodeID         string `json:"node_id"`
+			ProjectID      string `json:"project_id"`
+			CurrentVersion struct {
+				Payload json.RawMessage `json:"payload"`
+			} `json:"current_version"`
+		} `json:"nodes"`
+	}
+	if err := client.callTool(ctx, client.config.SearchTool, map[string]any{
+		"project_id": client.config.ProjectID,
+		"query":      query,
+		"node_kind":  "task",
+		"limit":      limit,
+	}, &result); err != nil {
+		return nil, err
+	}
+	tasks := make([]Task, 0, len(result.Nodes))
+	for _, node := range result.Nodes {
+		if len(node.CurrentVersion.Payload) == 0 {
+			continue
+		}
+		var task Task
+		if err := json.Unmarshal(node.CurrentVersion.Payload, &task); err != nil {
+			return nil, fmt.Errorf("decode task search result %s: %w", node.NodeID, err)
+		}
+		var metadata struct {
+			FleetUpdatedAt string `json:"fleet_updated_at"`
+		}
+		_ = json.Unmarshal(node.CurrentVersion.Payload, &metadata)
+		if task.TaskID == "" {
+			task.TaskID = node.NodeID
+		}
+		if task.ProjectID == "" {
+			task.ProjectID = node.ProjectID
+		}
+		if task.UpdatedAt.IsZero() && metadata.FleetUpdatedAt != "" {
+			task.UpdatedAt = parseTimestamp(metadata.FleetUpdatedAt)
+		}
+		if task.TaskID == "" || (task.ProjectID != "" && task.ProjectID != client.config.ProjectID) {
+			return nil, errors.New("task search returned an invalid task identity")
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, nil
 }
 
 type HistorySource interface {

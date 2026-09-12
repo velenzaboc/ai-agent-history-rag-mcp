@@ -197,10 +197,10 @@ func (service *Service) Program(ctx context.Context, programID string) (ProgramV
 	}, nil
 }
 
-func (service *Service) TaskPrompt(ctx context.Context, taskID string) (TaskPrompt, error) {
+func (service *Service) RelatedWork(ctx context.Context, taskID string) (RelatedWorkPacket, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" || len(taskID) > 512 {
-		return TaskPrompt{}, errors.New("task_id is required")
+		return RelatedWorkPacket{}, errors.New("task_id is required")
 	}
 	type snapshotResult struct {
 		snapshot FleetSnapshot
@@ -222,11 +222,11 @@ func (service *Service) TaskPrompt(ctx context.Context, taskID string) (TaskProm
 	}()
 	snapshotOutcome := <-snapshotChannel
 	if snapshotOutcome.err != nil {
-		return TaskPrompt{}, fmt.Errorf("read task context: %w", snapshotOutcome.err)
+		return RelatedWorkPacket{}, fmt.Errorf("read task context: %w", snapshotOutcome.err)
 	}
 	worklinksOutcome := <-worklinksChannel
 	if worklinksOutcome.err != nil {
-		return TaskPrompt{}, fmt.Errorf("read exact task worklinks: %w", worklinksOutcome.err)
+		return RelatedWorkPacket{}, fmt.Errorf("read exact task worklinks: %w", worklinksOutcome.err)
 	}
 	var task *Task
 	for index := range snapshotOutcome.snapshot.Tasks {
@@ -236,8 +236,409 @@ func (service *Service) TaskPrompt(ctx context.Context, taskID string) (TaskProm
 		}
 	}
 	if task == nil {
-		return TaskPrompt{}, errors.New("task is not present in its scoped snapshot")
+		return RelatedWorkPacket{}, errors.New("task is not present in its scoped snapshot")
 	}
+	query := service.discoveryQuery(*task)
+	if query == "" {
+		return RelatedWorkPacket{}, errors.New("configured task fields produced no discovery query")
+	}
+
+	type taskSearchResult struct {
+		tasks []Task
+		err   error
+	}
+	type historySearchResult struct {
+		kind  string
+		batch HistoryBatch
+		err   error
+	}
+	taskSearchChannel := make(chan taskSearchResult, 1)
+	historySearchCount := 0
+	if service.config.Discovery.SearchConversations {
+		historySearchCount++
+	}
+	if service.config.Discovery.SearchFiles {
+		historySearchCount++
+	}
+	historySearchChannel := make(chan historySearchResult, historySearchCount)
+	go func() {
+		tasks, err := service.fleet.Search(ctx, query, service.config.Discovery.CandidateLimit)
+		taskSearchChannel <- taskSearchResult{tasks: tasks, err: err}
+	}()
+	if service.config.Discovery.SearchConversations {
+		go func() {
+			batch, err := service.history.Search(ctx, HistorySearch{Query: query, Limit: service.config.Discovery.HistoryLimit})
+			historySearchChannel <- historySearchResult{kind: "conversations", batch: batch, err: err}
+		}()
+	}
+	if service.config.Discovery.SearchFiles {
+		go func() {
+			batch, err := service.history.Search(ctx, HistorySearch{Query: query, Limit: service.config.Discovery.HistoryLimit, Files: true})
+			historySearchChannel <- historySearchResult{kind: "files", batch: batch, err: err}
+		}()
+	}
+
+	taskSearchOutcome := <-taskSearchChannel
+	searchCandidates := make([]Task, 0, len(taskSearchOutcome.tasks))
+	seenTasks := make(map[string]struct{}, len(taskSearchOutcome.tasks))
+	for _, candidate := range taskSearchOutcome.tasks {
+		if candidate.TaskID == "" || candidate.TaskID == taskID {
+			continue
+		}
+		if _, exists := seenTasks[candidate.TaskID]; exists {
+			continue
+		}
+		seenTasks[candidate.TaskID] = struct{}{}
+		searchCandidates = append(searchCandidates, candidate)
+	}
+
+	historyComplete := true
+	historyErrors := make([]string, 0)
+	historyByKey := make(map[string]SessionSummary)
+	for range historySearchCount {
+		outcome := <-historySearchChannel
+		if outcome.err != nil {
+			historyComplete = false
+			historyErrors = append(historyErrors, outcome.kind+": "+outcome.err.Error())
+			continue
+		}
+		for _, session := range outcome.batch.Sessions {
+			key := historyEvidenceKey(session)
+			current, exists := historyByKey[key]
+			if !exists || current.Timestamp.Before(session.Timestamp) || len(current.Summary) < len(session.Summary) {
+				historyByKey[key] = session
+			}
+		}
+	}
+	history := sortedSessions(historyByKey)
+	if len(history) > service.config.Discovery.HistoryLimit {
+		history = history[:service.config.Discovery.HistoryLimit]
+	}
+	service.cacheSessions(history)
+
+	hydrated, hydrationErrors := service.hydrateCandidateWorklinks(ctx, searchCandidates)
+	candidates := make([]RelatedTaskCandidate, 0, len(searchCandidates))
+	for _, candidate := range searchCandidates {
+		links := hydrated[candidate.TaskID]
+		score, reasons, sharedArtifact := service.scoreRelatedTask(*task, worklinksOutcome.links, candidate, links)
+		verdictID := ""
+		if sharedArtifact && service.isActive(candidate.Status) {
+			verdictID = "collision"
+		} else if service.isTerminal(candidate.Status) && score >= service.config.Discovery.Thresholds.ReuseScore {
+			verdictID = "reuse"
+		} else if score >= service.config.Discovery.Thresholds.RelatedScore {
+			verdictID = "related"
+		}
+		if verdictID == "" {
+			continue
+		}
+		candidates = append(candidates, RelatedTaskCandidate{Task: candidate, Score: score, Verdict: service.discoveryVerdict(verdictID, ""), Reasons: reasons, Worklinks: links})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Verdict.ID != candidates[j].Verdict.ID {
+			priority := map[string]int{"collision": 0, "reuse": 1, "related": 2}
+			return priority[candidates[i].Verdict.ID] < priority[candidates[j].Verdict.ID]
+		}
+		if candidates[i].Score != candidates[j].Score {
+			return candidates[i].Score > candidates[j].Score
+		}
+		return candidates[i].Task.TaskID < candidates[j].Task.TaskID
+	})
+
+	decisionID := "new"
+	detail := "No configured related-work evidence was returned."
+	for _, candidate := range candidates {
+		if candidate.Verdict.ID == "collision" {
+			decisionID = "collision"
+			detail = "Another active task shares an exact durable artifact binding; inspect both before changing state."
+			break
+		}
+	}
+	if decisionID != "collision" && len(worklinksOutcome.links) > 0 {
+		decisionID = "resume"
+		detail = "This task already has durable work bindings; resume them before creating replacement work."
+	} else if decisionID == "new" && len(candidates) > 0 {
+		decisionID = candidates[0].Verdict.ID
+		detail = "Related task evidence is available for reuse or comparison."
+	} else if decisionID == "new" && len(history) > 0 {
+		decisionID = "related"
+		detail = "Related history evidence is available; inspect it before starting new work."
+	}
+
+	passes := []DiscoveryPass{
+		{ID: "exact_bindings", Label: "Exact bindings", Complete: true, Count: len(worklinksOutcome.links), Detail: "Stable task identity and exact worklinks."},
+		{ID: "structural_context", Label: "Structural context", Complete: true, Count: len(snapshotOutcome.snapshot.Tasks), Detail: "Acceptance and dependency closure."},
+		{ID: "task_search", Label: "Ranked task search", Complete: taskSearchOutcome.err == nil, Count: len(searchCandidates)},
+		{ID: "artifact_hydration", Label: "Artifact hydration", Complete: len(hydrationErrors) == 0, Count: len(hydrated)},
+		{ID: "history_search", Label: "History search", Complete: historyComplete, Count: len(history)},
+	}
+	if taskSearchOutcome.err != nil {
+		passes[2].Error = taskSearchOutcome.err.Error()
+	}
+	if len(hydrationErrors) > 0 {
+		passes[3].Error = strings.Join(hydrationErrors, "; ")
+	}
+	if len(historyErrors) > 0 {
+		passes[4].Error = strings.Join(historyErrors, "; ")
+	}
+	complete := true
+	for _, pass := range passes {
+		complete = complete && pass.Complete
+	}
+	contextTasks := append([]Task(nil), snapshotOutcome.snapshot.Tasks...)
+	sort.SliceStable(contextTasks, func(i, j int) bool { return contextTasks[i].TaskID < contextTasks[j].TaskID })
+	dependencies := append([]Dependency(nil), snapshotOutcome.snapshot.Dependencies...)
+	sort.SliceStable(dependencies, func(i, j int) bool {
+		if dependencies[i].TaskID != dependencies[j].TaskID {
+			return dependencies[i].TaskID < dependencies[j].TaskID
+		}
+		return dependencies[i].DependsOnTaskID < dependencies[j].DependsOnTaskID
+	})
+	links := append([]Worklink(nil), worklinksOutcome.links...)
+	sortWorklinks(links)
+	return RelatedWorkPacket{
+		TaskID: taskID, GeneratedAt: service.now().UTC(), ProjectID: snapshotOutcome.snapshot.ProjectID,
+		Revision: snapshotOutcome.snapshot.Revision, ReadTimestamp: snapshotOutcome.snapshot.ReadTimestamp,
+		StoreType: snapshotOutcome.snapshot.StoreType, Scope: snapshotOutcome.snapshot.Scope, Query: query,
+		Complete: complete, Decision: service.discoveryVerdict(decisionID, detail), Task: *task,
+		ContextTasks: contextTasks, Dependencies: dependencies, Worklinks: links, Candidates: candidates,
+		History: history, Passes: passes,
+	}, nil
+}
+
+func (service *Service) discoveryQuery(task Task) string {
+	values := make([]string, 0, len(service.config.Discovery.QueryFields))
+	for _, field := range service.config.Discovery.QueryFields {
+		switch field {
+		case "task_id":
+			values = append(values, task.TaskID)
+		case "title":
+			values = append(values, task.Title)
+		case "note":
+			values = append(values, task.Note)
+		case "pillar":
+			values = append(values, task.Pillar)
+		case "owner":
+			values = append(values, task.Owner)
+		case "level":
+			values = append(values, task.Level)
+		}
+	}
+	seen := make(map[string]struct{})
+	terms := make([]string, 0, service.config.Discovery.MaxQueryTerms)
+	for _, value := range values {
+		for _, token := range service.discoveryTokens(value) {
+			if _, exists := seen[token]; exists {
+				continue
+			}
+			seen[token] = struct{}{}
+			terms = append(terms, token)
+			if len(terms) == service.config.Discovery.MaxQueryTerms {
+				return strings.Join(terms, " ")
+			}
+		}
+	}
+	return strings.Join(terms, " ")
+}
+
+func (service *Service) discoveryTokens(value string) []string {
+	stopWords := make(map[string]struct{}, len(service.config.Discovery.StopWords))
+	for _, word := range service.config.Discovery.StopWords {
+		stopWords[word] = struct{}{}
+	}
+	tokens := make([]string, 0)
+	for _, token := range tokenize(value) {
+		if len(token) < service.config.Discovery.MinTokenLength {
+			continue
+		}
+		if _, stopped := stopWords[token]; stopped {
+			continue
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens
+}
+
+func (service *Service) hydrateCandidateWorklinks(ctx context.Context, candidates []Task) (map[string][]Worklink, []string) {
+	limit := service.config.Discovery.HydrateLimit
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+	if limit == 0 {
+		return map[string][]Worklink{}, nil
+	}
+	type outcome struct {
+		taskID string
+		links  []Worklink
+		err    error
+	}
+	jobs := make(chan string)
+	results := make(chan outcome, limit)
+	workers := service.config.Discovery.HydrateConcurrency
+	if workers > limit {
+		workers = limit
+	}
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for taskID := range jobs {
+				links, err := service.fleet.Worklinks(ctx, taskID)
+				results <- outcome{taskID: taskID, links: links, err: err}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, candidate := range candidates[:limit] {
+			select {
+			case jobs <- candidate.TaskID:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	group.Wait()
+	close(results)
+	hydrated := make(map[string][]Worklink, limit)
+	errorsByTask := make([]string, 0)
+	for result := range results {
+		if result.err != nil {
+			errorsByTask = append(errorsByTask, result.taskID+": "+result.err.Error())
+			continue
+		}
+		sortWorklinks(result.links)
+		hydrated[result.taskID] = result.links
+	}
+	sort.Strings(errorsByTask)
+	return hydrated, errorsByTask
+}
+
+func (service *Service) scoreRelatedTask(root Task, rootLinks []Worklink, candidate Task, candidateLinks []Worklink) (int, []string, bool) {
+	score := service.config.Discovery.Weights["search_hit"]
+	reasons := make([]string, 0, 8)
+	if service.config.Discovery.Weights["search_hit"] > 0 {
+		reasons = append(reasons, "search_hit")
+	}
+	titleOverlap := service.relatedTokenOverlap(root.Title, candidate.Title)
+	if titleOverlap > 0 {
+		score += titleOverlap * service.config.Discovery.Weights["title_token_overlap"]
+		reasons = append(reasons, fmt.Sprintf("title_token_overlap:%d", titleOverlap))
+	}
+	noteOverlap := service.relatedTokenOverlap(root.Note, candidate.Note)
+	if noteOverlap > 0 {
+		score += noteOverlap * service.config.Discovery.Weights["note_token_overlap"]
+		reasons = append(reasons, fmt.Sprintf("note_token_overlap:%d", noteOverlap))
+	}
+	if root.Repo != "" && strings.EqualFold(root.Repo, candidate.Repo) {
+		score += service.config.Discovery.Weights["same_repo"]
+		reasons = append(reasons, "same_repo")
+	}
+	if root.ParentID != "" && root.ParentID == candidate.ParentID {
+		score += service.config.Discovery.Weights["same_parent"]
+		reasons = append(reasons, "same_parent")
+	}
+	if root.Pillar != "" && strings.EqualFold(root.Pillar, candidate.Pillar) {
+		score += service.config.Discovery.Weights["same_pillar"]
+		reasons = append(reasons, "same_pillar")
+	}
+	sharedArtifact := worklinksOverlap(rootLinks, candidateLinks, service.normalizedPath)
+	if sharedArtifact {
+		score += service.config.Discovery.Weights["shared_artifact"]
+		reasons = append(reasons, "shared_artifact")
+	}
+	if service.isTerminal(candidate.Status) {
+		score += service.config.Discovery.Weights["terminal"]
+		reasons = append(reasons, "terminal")
+	}
+	return score, reasons, sharedArtifact
+}
+
+func (service *Service) relatedTokenOverlap(left, right string) int {
+	leftTokens := make(map[string]struct{})
+	for _, token := range service.discoveryTokens(left) {
+		leftTokens[token] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	overlap := 0
+	for _, token := range service.discoveryTokens(right) {
+		if _, duplicate := seen[token]; duplicate {
+			continue
+		}
+		seen[token] = struct{}{}
+		if _, matches := leftTokens[token]; matches {
+			overlap++
+		}
+	}
+	return overlap
+}
+
+func (service *Service) discoveryVerdict(id, detail string) DiscoveryVerdict {
+	for _, verdict := range service.config.Discovery.Verdicts {
+		if verdict.ID == id {
+			return DiscoveryVerdict{ID: verdict.ID, Label: verdict.Label, Color: verdict.Color, Detail: detail}
+		}
+	}
+	return DiscoveryVerdict{ID: id, Detail: detail}
+}
+
+func historyEvidenceKey(session SessionSummary) string {
+	if session.ChunkID != "" {
+		return "chunk:" + session.ChunkID
+	}
+	return strings.Join([]string{session.SessionID, session.FilePath, session.Operation, session.Summary}, "\x00")
+}
+
+func worklinksOverlap(left, right []Worklink, normalize func(string) string) bool {
+	keys := make(map[string]struct{})
+	for _, link := range left {
+		if ref := normalize(link.ArtifactRef); ref != "" {
+			keys[strings.ToLower(link.ArtifactType)+"\x00"+ref] = struct{}{}
+		}
+		if thread := strings.ToLower(strings.TrimSpace(link.Thread)); thread != "" {
+			keys["thread\x00"+thread] = struct{}{}
+		}
+	}
+	for _, link := range right {
+		if ref := normalize(link.ArtifactRef); ref != "" {
+			if _, exists := keys[strings.ToLower(link.ArtifactType)+"\x00"+ref]; exists {
+				return true
+			}
+		}
+		if thread := strings.ToLower(strings.TrimSpace(link.Thread)); thread != "" {
+			if _, exists := keys["thread\x00"+thread]; exists {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sortWorklinks(links []Worklink) {
+	sort.SliceStable(links, func(i, j int) bool {
+		if links[i].ArtifactType != links[j].ArtifactType {
+			return links[i].ArtifactType < links[j].ArtifactType
+		}
+		return links[i].ArtifactRef < links[j].ArtifactRef
+	})
+}
+
+func (service *Service) TaskPrompt(ctx context.Context, taskID string) (TaskPrompt, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" || len(taskID) > 512 {
+		return TaskPrompt{}, errors.New("task_id is required")
+	}
+	related, err := service.RelatedWork(ctx, taskID)
+	if err != nil {
+		return TaskPrompt{}, fmt.Errorf("build related-work preflight: %w", err)
+	}
+	task := &related.Task
+	snapshotOutcome := struct{ snapshot FleetSnapshot }{snapshot: FleetSnapshot{
+		ProjectID: related.ProjectID, Revision: related.Revision, ReadTimestamp: related.ReadTimestamp,
+		StoreType: related.StoreType, Scope: related.Scope, Tasks: related.ContextTasks, Dependencies: related.Dependencies,
+	}}
+	worklinksOutcome := struct{ links []Worklink }{links: related.Worklinks}
 
 	contextTasks := append([]Task(nil), snapshotOutcome.snapshot.Tasks...)
 	sort.SliceStable(contextTasks, func(i, j int) bool { return contextTasks[i].TaskID < contextTasks[j].TaskID })
@@ -249,12 +650,7 @@ func (service *Service) TaskPrompt(ctx context.Context, taskID string) (TaskProm
 		return dependencies[i].DependsOnTaskID < dependencies[j].DependsOnTaskID
 	})
 	links := append([]Worklink(nil), worklinksOutcome.links...)
-	sort.SliceStable(links, func(i, j int) bool {
-		if links[i].ArtifactType != links[j].ArtifactType {
-			return links[i].ArtifactType < links[j].ArtifactType
-		}
-		return links[i].ArtifactRef < links[j].ArtifactRef
-	})
+	sortWorklinks(links)
 
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "Execute fleet-plan task %s.\n\n", taskID)
@@ -299,6 +695,33 @@ func (service *Service) TaskPrompt(ctx context.Context, taskID string) (TaskProm
 				fmt.Fprintf(&builder, " (thread %s)", link.Thread)
 			}
 			builder.WriteByte('\n')
+		}
+	}
+	builder.WriteString("\nRELATED-WORK PREFLIGHT — evidence only; never mutates fleet-plan\n")
+	fmt.Fprintf(&builder, "Decision: %s (%s)\nQuery: %s\nCoverage complete: %t\n", related.Decision.Label, related.Decision.ID, related.Query, related.Complete)
+	if related.Decision.Detail != "" {
+		fmt.Fprintf(&builder, "Reason: %s\n", related.Decision.Detail)
+	}
+	for _, pass := range related.Passes {
+		fmt.Fprintf(&builder, "- pass %s: complete=%t count=%d", pass.ID, pass.Complete, pass.Count)
+		if pass.Error != "" {
+			fmt.Fprintf(&builder, " error=%s", pass.Error)
+		}
+		builder.WriteByte('\n')
+	}
+	if len(related.Candidates) > 0 {
+		builder.WriteString("Related task candidates:\n")
+		for _, candidate := range related.Candidates {
+			fmt.Fprintf(&builder, "- %s [%s] %s; verdict=%s; score=%d; reasons=%s\n", candidate.Task.TaskID, candidate.Task.Status, candidate.Task.Title, candidate.Verdict.ID, candidate.Score, strings.Join(candidate.Reasons, ","))
+			for _, link := range candidate.Worklinks {
+				fmt.Fprintf(&builder, "  - %s: %s\n", link.ArtifactType, link.ArtifactRef)
+			}
+		}
+	}
+	if len(related.History) > 0 {
+		builder.WriteString("Related history evidence:\n")
+		for _, session := range related.History {
+			fmt.Fprintf(&builder, "- %s; project=%s; machine=%s; recorded=%s; summary=%s\n", session.SessionID, session.ProjectName, session.MachineID, formatTime(session.Timestamp), truncateText(session.Summary, service.config.View.SummaryPreviewCharacters))
 		}
 	}
 	builder.WriteString("\nKeep this exact task id as the stable work identity. Before creating a branch, worktree, or replacement task, inspect every durable work link above and resume an existing binding when one exists. Read any linked thread transcript or indexed history before acting. Verify current repository and live task state, then carry this task through its stated evidence and completion contract.")
@@ -695,6 +1118,17 @@ func (service *Service) isActive(status string) bool {
 	return contains(service.config.Status.ActiveGroupIDs, group)
 }
 
+func (service *Service) isTerminal(status string) bool {
+	group := ""
+	for _, candidate := range service.config.Status.Groups {
+		if containsFold(candidate.Statuses, status) {
+			group = candidate.ID
+			break
+		}
+	}
+	return contains(service.config.Status.TerminalGroupIDs, group)
+}
+
 func configuredFinding(rule ClassificationRule, kind, taskID, sessionID string, age int, detail string, sortTime time.Time) Finding {
 	return Finding{Kind: kind, Label: rule.Label, Severity: rule.Severity, Color: rule.Color, TaskID: taskID, SessionID: sessionID, AgeHours: age, Detail: detail, SortTime: sortTime}
 }
@@ -774,4 +1208,13 @@ func formatTime(value time.Time) string {
 		return "unknown"
 	}
 	return value.UTC().Format(time.RFC3339)
+}
+
+func truncateText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:limit])) + "…"
 }

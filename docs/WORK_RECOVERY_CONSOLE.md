@@ -34,7 +34,12 @@ a second work-state database.
   durable work links.
 - A copyable task prompt on every task drawer, including tasks with no linked
   history session. It is built from that task's coherent
-  `acceptance_dependency_closure` plus its exact durable work links.
+  `acceptance_dependency_closure`, exact durable work links, and the same
+  multipass related-work packet shown in the drawer.
+- Automatic related-work discovery whenever a task opens: exact bindings,
+  structural closure, ranked task search, bounded artifact hydration, and
+  conversation/file-history search. Candidate verdicts distinguish an active
+  binding collision, reusable terminal work, and weaker related evidence.
 
 The console never writes either source. A relationship is a scored display
 projection, not a task-graph mutation or new authority.
@@ -79,6 +84,23 @@ Selecting a task calls the configured `worklinks_tool` for that exact task. The
 drawer and restart-prompt path therefore use current durable work links even
 when the task itself arrived only through the active overlay.
 
+The same click also runs the configured related-work pipeline. It derives a
+bounded query from configured task fields and stop words, excludes the selected
+task itself, hydrates exact work links for only the highest-ranked configured
+number of candidates, and searches conversation and file-change history in
+parallel. Title overlap, note overlap, repository, parent, pillar, terminal
+status, and exact shared artifacts are weighted only by configuration. An exact
+shared artifact on another active task is surfaced as a collision. Terminal
+work above the reuse threshold is surfaced as reusable; other candidates must
+cross the related threshold. Failures remain visible per pass rather than being
+misreported as an empty result.
+
+"Combine" is intentionally a read-only work-family projection. The console
+never merges tasks or rewrites their status: two similar titles can still have
+different acceptance contracts, and cognition does not own authoritative task
+mutation. Exact stable bindings tell an agent to resume; ranked similarity tells
+it what to inspect or reuse.
+
 The task-prompt path does not depend on a history match. It requests a coherent
 `acceptance_dependency_closure` rooted at the selected task, bounded by
 `fleet.task_prompt_limit`, and combines the root task contract, context tasks,
@@ -106,9 +128,10 @@ cannot retrieve the same session by exact ID.
 |---|---|
 | root | listener, base path, request timeout, shutdown timeout |
 | `access` | optional bearer protection for the console itself; `none` requires a loopback listener |
-| `fleet` | MCP URL, project and root scope, snapshot/active/exact-worklink tool names, coherent/active/task-prompt limits, response bound |
+| `fleet` | MCP URL, project and root scope, snapshot/active/exact-worklink/search tool names, coherent/active/task-prompt limits, response bound |
 | `history` | compatibility API URL and paths, auth environment name, search behavior, cache/probe/response bounds |
 | `matching` | session-ID grammar, cross-machine path normalization, evidence weights, acceptance thresholds |
+| `discovery` | query fields and stop words, task/history/hydration limits, concurrency, scoring weights, thresholds, and verdict labels/colors |
 | `classification` | stale/abandoned ages plus finding labels, severities, and colors |
 | `programs` | zero or more live subtree pages: navigation text, root and lane identity, expected lane count, stage prefixes, source-thread coordinates, and subtree limit |
 | `status` | lane taxonomy, active and terminal groups, milestone level names |
@@ -160,5 +183,6 @@ node --check internal/recovery/web/app.js
 
 After starting a configured instance, verify `GET /healthz`, force one
 `GET /api/dashboard?fresh=1`, load every configured `GET /api/program?id=...`,
-exercise history search, open a KANBAN task with and without a history match,
-and copy both task and restart prompts from a real browser.
+exercise history search, open `GET /api/task/related?task_id=...` for a task with
+known bindings and one without, open a KANBAN task in a real browser, follow a
+related-task candidate, and copy both task and restart prompts.

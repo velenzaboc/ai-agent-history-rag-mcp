@@ -34,6 +34,7 @@ type Config struct {
 	Fleet                  FleetConfig          `json:"fleet"`
 	History                HistoryConfig        `json:"history"`
 	Matching               MatchingConfig       `json:"matching"`
+	Discovery              DiscoveryConfig      `json:"discovery"`
 	Classification         ClassificationConfig `json:"classification"`
 	Programs               []ProgramConfig      `json:"programs"`
 	Status                 StatusConfig         `json:"status"`
@@ -52,6 +53,7 @@ type FleetConfig struct {
 	SnapshotTool     string `json:"snapshot_tool"`
 	TasksTool        string `json:"tasks_tool"`
 	WorklinksTool    string `json:"worklinks_tool"`
+	SearchTool       string `json:"search_tool"`
 	Scope            string `json:"scope"`
 	RootTaskID       string `json:"root_task_id"`
 	Limit            int    `json:"limit"`
@@ -118,6 +120,34 @@ type MatchingConfig struct {
 	Weights          map[string]int `json:"weights"`
 	AcceptScore      int            `json:"accept_score"`
 	SuggestScore     int            `json:"suggest_score"`
+}
+
+type DiscoveryConfig struct {
+	Enabled             bool                     `json:"enabled"`
+	CandidateLimit      int                      `json:"candidate_limit"`
+	HydrateLimit        int                      `json:"hydrate_limit"`
+	HydrateConcurrency  int                      `json:"hydrate_concurrency"`
+	HistoryLimit        int                      `json:"history_limit"`
+	SearchConversations bool                     `json:"search_conversations"`
+	SearchFiles         bool                     `json:"search_files"`
+	MaxQueryTerms       int                      `json:"max_query_terms"`
+	MinTokenLength      int                      `json:"min_token_length"`
+	QueryFields         []string                 `json:"query_fields"`
+	StopWords           []string                 `json:"stop_words"`
+	Weights             map[string]int           `json:"weights"`
+	Thresholds          DiscoveryThresholdConfig `json:"thresholds"`
+	Verdicts            []DiscoveryVerdictConfig `json:"verdicts"`
+}
+
+type DiscoveryThresholdConfig struct {
+	RelatedScore int `json:"related_score"`
+	ReuseScore   int `json:"reuse_score"`
+}
+
+type DiscoveryVerdictConfig struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Color string `json:"color"`
 }
 
 type PathRewrite struct {
@@ -267,6 +297,9 @@ func (cfg Config) validate() error {
 	if err := cfg.Matching.validate(); err != nil {
 		return fmt.Errorf("matching: %w", err)
 	}
+	if err := cfg.Discovery.validate(); err != nil {
+		return fmt.Errorf("discovery: %w", err)
+	}
 	if err := cfg.Classification.validate(); err != nil {
 		return fmt.Errorf("classification: %w", err)
 	}
@@ -292,11 +325,11 @@ func (cfg FleetConfig) validate() error {
 	if err := validateEndpoint(cfg.Endpoint); err != nil {
 		return err
 	}
-	if strings.TrimSpace(cfg.ProjectID) == "" || strings.TrimSpace(cfg.SnapshotTool) == "" || strings.TrimSpace(cfg.WorklinksTool) == "" || strings.TrimSpace(cfg.Scope) == "" {
-		return errors.New("project_id, snapshot_tool, worklinks_tool, and scope are required")
+	if strings.TrimSpace(cfg.ProjectID) == "" || strings.TrimSpace(cfg.SnapshotTool) == "" || strings.TrimSpace(cfg.WorklinksTool) == "" || strings.TrimSpace(cfg.SearchTool) == "" || strings.TrimSpace(cfg.Scope) == "" {
+		return errors.New("project_id, snapshot_tool, worklinks_tool, search_tool, and scope are required")
 	}
-	if !identifierPattern.MatchString(cfg.SnapshotTool) || !identifierPattern.MatchString(cfg.WorklinksTool) {
-		return errors.New("snapshot_tool or worklinks_tool is invalid")
+	if !identifierPattern.MatchString(cfg.SnapshotTool) || !identifierPattern.MatchString(cfg.WorklinksTool) || !identifierPattern.MatchString(cfg.SearchTool) {
+		return errors.New("snapshot_tool, worklinks_tool, or search_tool is invalid")
 	}
 	if cfg.Limit < 1 || cfg.Limit > 100000 {
 		return errors.New("limit must be between 1 and 100000")
@@ -419,6 +452,69 @@ func (cfg MatchingConfig) validate() error {
 	return nil
 }
 
+func (cfg DiscoveryConfig) validate() error {
+	if !cfg.Enabled {
+		return errors.New("enabled must be true")
+	}
+	if cfg.CandidateLimit < 1 || cfg.CandidateLimit > 100 || cfg.HydrateLimit < 1 || cfg.HydrateLimit > cfg.CandidateLimit || cfg.HydrateConcurrency < 1 || cfg.HydrateConcurrency > 16 || cfg.HistoryLimit < 1 || cfg.HistoryLimit > 50 {
+		return errors.New("candidate, hydration, or history limits are outside the supported bounds")
+	}
+	if !cfg.SearchConversations && !cfg.SearchFiles {
+		return errors.New("at least one history search pass is required")
+	}
+	if cfg.MaxQueryTerms < 1 || cfg.MaxQueryTerms > 8 || cfg.MinTokenLength < 2 || cfg.MinTokenLength > 32 {
+		return errors.New("query term limits are outside the supported bounds")
+	}
+	allowedFields := map[string]struct{}{"task_id": {}, "title": {}, "note": {}, "pillar": {}, "owner": {}, "level": {}}
+	seenFields := make(map[string]struct{}, len(cfg.QueryFields))
+	for _, field := range cfg.QueryFields {
+		if _, ok := allowedFields[field]; !ok {
+			return fmt.Errorf("query field %s is not supported", field)
+		}
+		if _, exists := seenFields[field]; exists {
+			return errors.New("query fields must be unique")
+		}
+		seenFields[field] = struct{}{}
+	}
+	if len(seenFields) == 0 {
+		return errors.New("at least one query field is required")
+	}
+	seenStopWords := make(map[string]struct{}, len(cfg.StopWords))
+	for _, word := range cfg.StopWords {
+		if word != strings.ToLower(strings.TrimSpace(word)) || len(word) < 1 || strings.ContainsAny(word, " \t\r\n") {
+			return errors.New("stop words must be unique lowercase tokens")
+		}
+		if _, exists := seenStopWords[word]; exists {
+			return errors.New("stop words must be unique lowercase tokens")
+		}
+		seenStopWords[word] = struct{}{}
+	}
+	for _, key := range []string{"search_hit", "title_token_overlap", "note_token_overlap", "same_repo", "same_parent", "same_pillar", "shared_artifact", "terminal"} {
+		if cfg.Weights[key] < 0 {
+			return fmt.Errorf("weight %s must be non-negative", key)
+		}
+	}
+	if cfg.Thresholds.RelatedScore < 1 || cfg.Thresholds.ReuseScore < cfg.Thresholds.RelatedScore {
+		return errors.New("score thresholds are inconsistent")
+	}
+	requiredVerdicts := map[string]bool{"resume": false, "collision": false, "reuse": false, "related": false, "new": false}
+	for _, verdict := range cfg.Verdicts {
+		if _, ok := requiredVerdicts[verdict.ID]; !ok || strings.TrimSpace(verdict.Label) == "" || !colorPattern.MatchString(verdict.Color) {
+			return errors.New("verdict registry contains an invalid id, label, or color")
+		}
+		if requiredVerdicts[verdict.ID] {
+			return errors.New("verdict ids must be unique")
+		}
+		requiredVerdicts[verdict.ID] = true
+	}
+	for id, present := range requiredVerdicts {
+		if !present {
+			return fmt.Errorf("verdict %s is required", id)
+		}
+	}
+	return nil
+}
+
 func (cfg ClassificationConfig) validate() error {
 	if cfg.StaleAfterHours < 1 || cfg.AbandonedAfterHours < cfg.StaleAfterHours {
 		return errors.New("abandoned_after_hours must be at least stale_after_hours")
@@ -505,7 +601,7 @@ func (cfg ViewConfig) validate() error {
 			return errors.New("theme colors must be six-digit hex values")
 		}
 	}
-	for _, key := range []string{"inbox", "lanes", "tasks", "milestones", "graph", "history_search", "copy_resume", "copy_task_prompt", "sources"} {
+	for _, key := range []string{"inbox", "lanes", "tasks", "milestones", "graph", "history_search", "related_work", "copy_resume", "copy_task_prompt", "sources"} {
 		if strings.TrimSpace(cfg.Labels[key]) == "" {
 			return fmt.Errorf("view label %s is required", key)
 		}

@@ -127,10 +127,64 @@ func TestTaskPromptUsesScopedTaskAuthorityWithoutSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"Execute fleet-plan task T-1", "Implement task prompt", "Acceptance requires a copyable prompt.", "T-2", "T-3", "/work/task-prompt", "r-task"} {
+	for _, expected := range []string{"Execute fleet-plan task T-1", "Implement task prompt", "Acceptance requires a copyable prompt.", "T-2", "T-3", "/work/task-prompt", "r-task", "RELATED-WORK PREFLIGHT"} {
 		if !strings.Contains(prompt.Text, expected) {
 			t.Fatalf("task prompt missing %q:\n%s", expected, prompt.Text)
 		}
+	}
+}
+
+func TestRelatedWorkRunsAllConfiguredPassesAndClassifiesCandidates(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	cfg := mustTestConfig(t)
+	searches := make(chan HistorySearch, 2)
+	fleet := stubFleet{
+		scoped: FleetSnapshot{
+			ProjectID: "project-a", Revision: "r-related", ReadTimestamp: "2026-09-11T12:00:00Z",
+			Tasks: []Task{
+				{TaskID: "T-1", ParentID: "ROOT", Title: "Build recovery console prompt", Status: "in_progress", Pillar: "delivery", Note: "Find and reuse existing agent work."},
+				{TaskID: "T-CONTEXT", ParentID: "T-1", Title: "Validate recovery console", Status: "not_started", Pillar: "delivery"},
+			},
+		},
+		search: []Task{
+			{TaskID: "T-1", Title: "Build recovery console prompt", Status: "in_progress", Pillar: "delivery"},
+			{TaskID: "T-OLD", ParentID: "ROOT", Title: "Prior recovery console prompt", Status: "complete", Pillar: "delivery"},
+			{TaskID: "T-LIVE", ParentID: "ROOT", Title: "Recovery console implementation", Status: "in_progress", Pillar: "delivery"},
+			{TaskID: "T-NOISE", Title: "Unrelated work", Status: "in_progress", Note: "Find and reuse existing agent work."},
+		},
+		worklinksByTask: map[string][]Worklink{
+			"T-1":    {{TaskID: "T-1", ArtifactType: "worktree", ArtifactRef: "/work/recovery"}},
+			"T-OLD":  {{TaskID: "T-OLD", ArtifactType: "commit", ArtifactRef: "abc123"}},
+			"T-LIVE": {{TaskID: "T-LIVE", ArtifactType: "worktree", ArtifactRef: "/work/recovery"}},
+		},
+	}
+	history := stubHistory{
+		search:   HistoryBatch{Sessions: []SessionSummary{{SessionID: "s-related", ChunkID: "chunk-related", Summary: "Implemented a recovery console prompt and validator", Timestamp: now.Add(-time.Hour)}}},
+		searches: searches,
+	}
+	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := service.RelatedWork(context.Background(), "T-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.Query == "" || packet.Decision.ID != "collision" || !packet.Complete || len(packet.Passes) != 5 {
+		t.Fatalf("unexpected related-work packet: %#v", packet)
+	}
+	if len(searches) != 2 || len(packet.History) != 1 {
+		t.Fatalf("history passes were not bounded and deduplicated: searches=%#v history=%#v", searches, packet.History)
+	}
+	verdicts := map[string]string{}
+	for _, candidate := range packet.Candidates {
+		verdicts[candidate.Task.TaskID] = candidate.Verdict.ID
+	}
+	if verdicts["T-LIVE"] != "collision" || verdicts["T-OLD"] != "reuse" {
+		t.Fatalf("unexpected candidate verdicts: %#v", verdicts)
+	}
+	if _, noisy := verdicts["T-NOISE"]; noisy {
+		t.Fatalf("note-only generic overlap crossed the related-work threshold: %#v", verdicts)
 	}
 }
 
@@ -170,19 +224,26 @@ func hasFinding(findings []Finding, kind, taskID, sessionID string) bool {
 }
 
 type stubFleet struct {
-	snapshot  FleetSnapshot
-	scoped    FleetSnapshot
-	worklinks []Worklink
-	err       error
+	snapshot        FleetSnapshot
+	scoped          FleetSnapshot
+	worklinks       []Worklink
+	worklinksByTask map[string][]Worklink
+	search          []Task
+	err             error
 }
 
 func (s stubFleet) Snapshot(context.Context) (FleetSnapshot, error) { return s.snapshot, s.err }
 func (s stubFleet) ScopedSnapshot(context.Context, string, string, int) (FleetSnapshot, error) {
 	return s.scoped, s.err
 }
-func (s stubFleet) Worklinks(context.Context, string) ([]Worklink, error) {
+
+func (s stubFleet) Worklinks(_ context.Context, taskID string) ([]Worklink, error) {
+	if s.worklinksByTask != nil {
+		return s.worklinksByTask[taskID], s.err
+	}
 	return s.worklinks, s.err
 }
+func (s stubFleet) Search(context.Context, string, int) ([]Task, error) { return s.search, s.err }
 
 type stubHistory struct {
 	recent       HistoryBatch
@@ -191,6 +252,7 @@ type stubHistory struct {
 	err          error
 	sessionErr   error
 	sessionCalls *int
+	searches     chan<- HistorySearch
 }
 
 func (s stubHistory) Recent(context.Context) (HistoryBatch, error) { return s.recent, s.err }
@@ -203,7 +265,10 @@ func (s stubHistory) Session(context.Context, string) (SessionSummary, error) {
 	}
 	return s.session, s.err
 }
-func (s stubHistory) Search(context.Context, HistorySearch) (HistoryBatch, error) {
+func (s stubHistory) Search(_ context.Context, search HistorySearch) (HistoryBatch, error) {
+	if s.searches != nil {
+		s.searches <- search
+	}
 	return s.search, s.err
 }
 func (s stubHistory) Status(context.Context) (SourceStatus, error) {

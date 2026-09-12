@@ -32,6 +32,8 @@ type Task struct {
 	ParentID       string    `json:"parent_id,omitempty"`
 	Pillar         string    `json:"pillar"`
 	ProjectID      string    `json:"project_id"`
+	Repo           string    `json:"repo,omitempty"`
+	SessionID      string    `json:"session_id,omitempty"`
 	Status         string    `json:"status"`
 	TaskID         string    `json:"task_id"`
 	Title          string    `json:"title"`
@@ -189,6 +191,50 @@ type TaskPrompt struct {
 	TaskID      string    `json:"task_id"`
 	GeneratedAt time.Time `json:"generated_at"`
 	Text        string    `json:"text"`
+}
+
+type DiscoveryVerdict struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Color  string `json:"color"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type DiscoveryPass struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Complete bool   `json:"complete"`
+	Count    int    `json:"count"`
+	Detail   string `json:"detail,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type RelatedTaskCandidate struct {
+	Task      Task             `json:"task"`
+	Score     int              `json:"score"`
+	Verdict   DiscoveryVerdict `json:"verdict"`
+	Reasons   []string         `json:"reasons"`
+	Worklinks []Worklink       `json:"worklinks"`
+}
+
+type RelatedWorkPacket struct {
+	TaskID        string                 `json:"task_id"`
+	GeneratedAt   time.Time              `json:"generated_at"`
+	ProjectID     string                 `json:"project_id"`
+	Revision      string                 `json:"revision"`
+	ReadTimestamp string                 `json:"read_timestamp"`
+	StoreType     string                 `json:"store_type,omitempty"`
+	Scope         json.RawMessage        `json:"scope,omitempty"`
+	Query         string                 `json:"query"`
+	Complete      bool                   `json:"complete"`
+	Decision      DiscoveryVerdict       `json:"decision"`
+	Task          Task                   `json:"task"`
+	ContextTasks  []Task                 `json:"context_tasks"`
+	Dependencies  []Dependency           `json:"dependencies"`
+	Worklinks     []Worklink             `json:"worklinks"`
+	Candidates    []RelatedTaskCandidate `json:"candidates"`
+	History       []SessionSummary       `json:"history"`
+	Passes        []DiscoveryPass        `json:"passes"`
 }
 
 type ProgramCounts struct {

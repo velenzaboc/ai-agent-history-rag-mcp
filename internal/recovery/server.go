@@ -25,6 +25,7 @@ type Application interface {
 	Dashboard(context.Context) (Dashboard, error)
 	Search(context.Context, HistorySearch) (HistoryBatch, error)
 	Worklinks(context.Context, string) (TaskWorklinks, error)
+	RelatedWork(context.Context, string) (RelatedWorkPacket, error)
 	ResumePacket(context.Context, string, string) (ResumePacket, error)
 	TaskPrompt(context.Context, string) (TaskPrompt, error)
 	Program(context.Context, string) (ProgramView, error)
@@ -72,10 +73,26 @@ func (server *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+server.route("api/dashboard"), server.serveDashboard)
 	mux.HandleFunc("POST "+server.route("api/history/search"), server.serveSearch)
 	mux.HandleFunc("GET "+server.route("api/task/worklinks"), server.serveWorklinks)
+	mux.HandleFunc("GET "+server.route("api/task/related"), server.serveRelatedWork)
 	mux.HandleFunc("GET "+server.route("api/task/prompt"), server.serveTaskPrompt)
 	mux.HandleFunc("GET "+server.route("api/resume"), server.serveResume)
 	mux.HandleFunc("GET "+server.route("api/program"), server.serveProgram)
 	return server.fixedHeaders(server.authenticate(mux))
+}
+
+func (server *Server) serveRelatedWork(response http.ResponseWriter, request *http.Request) {
+	taskID := strings.TrimSpace(request.URL.Query().Get("task_id"))
+	if len(taskID) > 512 || taskID == "" {
+		server.writeError(response, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	result, err := server.app.RelatedWork(request.Context(), taskID)
+	if err != nil {
+		server.logger.Printf("related work failed: %v", err)
+		server.writeError(response, http.StatusBadGateway, "related_work_unavailable")
+		return
+	}
+	server.writeJSON(response, http.StatusOK, result)
 }
 
 func (server *Server) serveWorklinks(response http.ResponseWriter, request *http.Request) {

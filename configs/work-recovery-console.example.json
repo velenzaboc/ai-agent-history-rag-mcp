@@ -15,6 +15,7 @@
     "snapshot_tool": "task_graph_project_snapshot",
     "tasks_tool": "task_graph_tasks",
     "worklinks_tool": "task_graph_worklinks",
+    "search_tool": "task_graph_search",
     "scope": "project",
     "root_task_id": "",
     "limit": 1000,
@@ -67,6 +68,40 @@
     },
     "accept_score": 70,
     "suggest_score": 30
+  },
+  "discovery": {
+    "enabled": true,
+    "candidate_limit": 12,
+    "hydrate_limit": 8,
+    "hydrate_concurrency": 4,
+    "history_limit": 8,
+    "search_conversations": true,
+    "search_files": true,
+    "max_query_terms": 8,
+    "min_token_length": 3,
+    "query_fields": ["title", "note", "pillar", "task_id"],
+    "stop_words": ["and", "build", "create", "for", "implement", "implementation", "read", "task", "the", "this", "with", "work"],
+    "weights": {
+      "search_hit": 0,
+      "title_token_overlap": 15,
+      "note_token_overlap": 2,
+      "same_repo": 15,
+      "same_parent": 20,
+      "same_pillar": 10,
+      "shared_artifact": 100,
+      "terminal": 20
+    },
+    "thresholds": {
+      "related_score": 30,
+      "reuse_score": 50
+    },
+    "verdicts": [
+      {"id": "resume", "label": "Resume existing", "color": "#6DE1C0"},
+      {"id": "collision", "label": "Binding collision", "color": "#FF7D70"},
+      {"id": "reuse", "label": "Reuse prior work", "color": "#7EA7FF"},
+      {"id": "related", "label": "Related work", "color": "#F1B969"},
+      {"id": "new", "label": "No prior work", "color": "#91A0B5"}
+    ]
   },
   "classification": {
     "stale_after_hours": 168,
@@ -197,6 +232,7 @@
       "milestones": "Milestones",
       "graph": "Dependency graph",
       "history_search": "AI history search",
+      "related_work": "Related work",
       "copy_resume": "Copy restart prompt",
       "copy_task_prompt": "Copy task prompt",
       "sources": "Live sources"

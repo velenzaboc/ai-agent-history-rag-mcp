@@ -21,8 +21,9 @@ The repository also includes a config-driven, read-only browser console that
 joins task-graph state to AI history evidence. It surfaces a KANBAN view,
 config-driven program subtree pages, hierarchy and dependency graphs,
 milestones, abandoned or unlinked sessions, history search, copyable
-history-first restart prompts, and task prompts that need no session match—all
-without creating a second work-state store.
+history-first restart prompts, automatic multipass related-work discovery on
+every task open, and task prompts that carry the same discovery packet—all
+without creating a second work-state store or merging tasks by inference.
 
 See [Work Recovery Console](docs/WORK_RECOVERY_CONSOLE.md) and the
 [complete example configuration](configs/work-recovery-console.example.json).

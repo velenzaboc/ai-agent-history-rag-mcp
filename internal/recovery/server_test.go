@@ -131,14 +131,30 @@ func TestServerReturnsTaskPromptAndProgramView(t *testing.T) {
 	}
 }
 
+func TestServerReturnsRelatedWorkPacket(t *testing.T) {
+	cfg := mustTestConfig(t)
+	application := stubApplication{relatedWork: RelatedWorkPacket{TaskID: "T-1", Query: "recovery console", Decision: DiscoveryVerdict{ID: "related"}}}
+	server, err := NewServer(cfg, application, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/task/related?task_id=T-1", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"query":"recovery console"`) {
+		t.Fatalf("related work status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 type stubApplication struct {
-	dashboard  Dashboard
-	search     HistoryBatch
-	worklinks  TaskWorklinks
-	packet     ResumePacket
-	taskPrompt TaskPrompt
-	program    ProgramView
-	err        error
+	dashboard   Dashboard
+	search      HistoryBatch
+	worklinks   TaskWorklinks
+	packet      ResumePacket
+	taskPrompt  TaskPrompt
+	program     ProgramView
+	relatedWork RelatedWorkPacket
+	err         error
 }
 
 func (s stubApplication) Dashboard(context.Context) (Dashboard, error) { return s.dashboard, s.err }
@@ -156,4 +172,7 @@ func (s stubApplication) TaskPrompt(context.Context, string) (TaskPrompt, error)
 }
 func (s stubApplication) Program(context.Context, string) (ProgramView, error) {
 	return s.program, s.err
+}
+func (s stubApplication) RelatedWork(context.Context, string) (RelatedWorkPacket, error) {
+	return s.relatedWork, s.err
 }
