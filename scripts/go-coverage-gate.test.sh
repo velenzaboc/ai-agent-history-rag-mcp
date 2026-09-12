@@ -1,218 +1,524 @@
 #!/usr/bin/env bash
+# Behavioural harness for scripts/go-coverage-gate.sh.
 #
-# Controls for scripts/go-coverage-gate.sh.
+# Every case drives the DEPLOYED script through its real entrypoint against a
+# generated Go module. Nothing here re-implements the gate's logic, because a
+# harness that reasons about the gate instead of running it proves nothing.
 #
-# Every case fabricates a REAL temporary Go module and invokes the REAL gate
-# entrypoint -- the same path CI drives. Nothing is injected as pre-baked text,
-# because a gate whose inputs can be doctored is not a gate.
-#
-# The negative controls (a)-(c) prove it fails. The positive control (d) proves
-# it is calibrated: without (d) a gate that always failed would satisfy (a)-(c).
-#
-#   (a) NEGATIVE - a package with NO TESTS and no coverable statements. This is
-#       the exact shape the predecessor awk gate could not see: measured against
-#       go1.27.0, `go test -cover ./...` prints "?   pkg  [no test files]" with
-#       no "coverage:" token, so an awk rule keyed on /coverage:/ exited 0. The
-#       gate must FAIL and the package must APPEAR at 0.0%.
-#   (b) NEGATIVE - a package with tests but coverage below the floor.
-#   (c) NEGATIVE - a module with zero packages. An empty report is not a pass.
-#   (d) POSITIVE - every package tested and above the floor. Must exit 0.
-#   (e) NEGATIVE - a package whose tests FAIL while still reporting high
-#       coverage. Keying on the percentage alone would pass this.
-#   (f) NEGATIVE - a sub-floor COVERAGE_FLOOR is rejected, not honoured.
-#   (g) POSITIVE - a tested package with no coverable statements is legitimate.
+# The suite carries positive controls as well as negative ones: a gate that
+# failed everything would score 100% on negative cases alone.
+set -euo pipefail
 
-set -uo pipefail
-
-GATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/go-coverage-gate.sh"
-if [ ! -f "$GATE" ]; then
-	printf 'go-coverage-gate.test: cannot find %s\n' "$GATE" >&2
-	exit 1
-fi
-
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-
-# Fixtures are standalone modules with no requirements: they must not be pulled
-# into an enclosing workspace, and they never need the network.
-export GOWORK=off
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+GATE="$ROOT_DIR/scripts/go-coverage-gate.sh"
 export GOFLAGS=
+# Fixtures must stay below this checkout rather than an OS temporary directory.
+# The guarded PID leaf is exclusive and cleanup cannot escape TMP_ROOT.
+TMP_BASE="${COVERAGE_GATE_TEST_WORK_ROOT:-$ROOT_DIR/.go-coverage-gate-test-work}"
+mkdir -p -- "$TMP_BASE"
+TMP_ROOT="$TMP_BASE/run-$$"
+if ! mkdir -- "$TMP_ROOT"; then
+  printf 'go-coverage-gate.test: cannot allocate fixture directory: %s\n' "$TMP_ROOT" >&2
+  exit 2
+fi
+trap 'rm -rf -- "$TMP_ROOT"' EXIT
 
-pass_count=0
-fail_count=0
+PASS_COUNT=0
+OUT="$TMP_ROOT/out.txt"
 
-report() {
-	local ok="$1" name="$2" detail="$3"
-	if [ "$ok" = "yes" ]; then
-		printf 'PASS  %s\n' "$name"
-		pass_count=$((pass_count + 1))
-	else
-		printf 'FAIL  %s\n      %s\n' "$name" "$detail"
-		fail_count=$((fail_count + 1))
-	fi
+pass() { PASS_COUNT=$((PASS_COUNT + 1)); printf 'PASS %s\n' "$1"; }
+fail() { printf 'FAIL %s\n' "$1" >&2; printf -- '--- gate output ---\n%s\n-------------------\n' "$(cat "$OUT" 2>/dev/null)" >&2; exit 1; }
+
+run_gate() {
+  local dir="$1"; shift
+  set +e
+  ( cd "$dir" && bash "$GATE" --dir "$dir" "$@" ) >"$OUT" 2>&1
+  GATE_STATUS=$?
+  set -e
 }
 
-# covered_pkg <dir> <pkg> -- a package with tests that fully cover it.
-covered_pkg() {
-	mkdir -p "$1/$2"
-	printf 'package %s\n\nfunc Abs(x int) int {\n\tif x > 0 {\n\t\treturn x\n\t}\n\treturn -x\n}\n' "$2" >"$1/$2/impl.go"
-	printf 'package %s\n\nimport "testing"\n\nfunc TestAbs(t *testing.T) {\n\tif Abs(-2) != 2 {\n\t\tt.Fatal("neg")\n\t}\n\tif Abs(2) != 2 {\n\t\tt.Fatal("pos")\n\t}\n}\n' "$2" >"$1/$2/impl_test.go"
+run_gate_with_path() {
+  local dir="$1" path="$2"; shift 2
+  set +e
+  ( cd "$dir" && PATH="$path" bash "$GATE" --dir "$dir" "$@" ) >"$OUT" 2>&1
+  GATE_STATUS=$?
+  set -e
+}
+
+# Preserve the established positional-module and COVERAGE_FLOOR interface while
+# exercising the same real gate entrypoint.
+run_gate_legacy_interface() {
+  local dir="$1"
+  set +e
+  ( cd "$dir" && bash "$GATE" "$dir" ) >"$OUT" 2>&1
+  GATE_STATUS=$?
+  set -e
+}
+
+expect_status() {
+  local label="$1" want="$2"
+  [[ "$GATE_STATUS" -eq "$want" ]] || fail "$label: expected exit $want, got $GATE_STATUS"
+}
+
+expect_output() {
+  local label="$1" needle="$2"
+  grep -Fq -- "$needle" "$OUT" || fail "$label: output is missing the literal: $needle"
+}
+
+expect_no_output() {
+  local label="$1" needle="$2"
+  grep -Fq -- "$needle" "$OUT" && fail "$label: output unexpectedly contains: $needle"
+  return 0
 }
 
 new_module() {
-	local dir="$WORK/$1"
-	rm -rf "$dir"
-	mkdir -p "$dir"
-	printf 'module gatefixture/%s\n\ngo 1.27\n' "$1" >"$dir/go.mod"
-	printf '%s' "$dir"
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir"
+  printf 'module %s\n\ngo 1.22\n' "$1" >"$dir/go.mod"
+  printf '%s' "$dir"
 }
 
-# ---------------------------------------------------------------- (a) NEGATIVE
-# The measured vacuous-pass shape: no tests AND no coverable statements.
-d="$(new_module untested-no-statements)"
-covered_pkg "$d" good
-mkdir -p "$d/typesonly"
-printf 'package typesonly\n\ntype Record struct {\n\tID   string\n\tSize int\n}\n\ntype Reader interface {\n\tRead() (Record, error)\n}\n' >"$d/typesonly/types.go"
-out="$("$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-	report no "(a) test-less package fails" "gate exited 0 on a package with no tests"
-elif ! printf '%s' "$out" | grep -q 'typesonly'; then
-	report no "(a) test-less package fails" "package is absent from the report; hatch (b) still open"
-elif ! printf '%s' "$out" | grep -q 'NO TESTS'; then
-	report no "(a) test-less package fails" "package present but not marked NO TESTS"
-else
-	report yes "(a) test-less package fails AND appears at 0.0%" ""
-fi
+# A package whose test covers 9 of 10 statements (90%).
+add_good_package() {
+  local dir="$1" name="$2"
+  mkdir -p "$dir/$name"
+  {
+    printf 'package %s\n\n' "$name"
+    for i in $(seq 1 10); do printf 'func F%d() int { return %d }\n' "$i" "$i"; done
+  } >"$dir/$name/code.go"
+  {
+    printf 'package %s\n\nimport "testing"\n\n' "$name"
+    printf 'func TestCovered(t *testing.T) {\n\tsum := 0\n'
+    for i in $(seq 1 9); do printf '\tsum += F%d()\n' "$i"; done
+    printf '\tif sum == 0 {\n\t\tt.Fatal("no work")\n\t}\n}\n'
+  } >"$dir/$name/code_test.go"
+}
 
-# Positive control on the instrument itself: prove the predecessor awk rule
-# really did pass this exact module, so case (a) is measuring a closed hole
-# rather than a hole that never existed.
-( cd "$d" && go test -count=1 -cover ./... >"$WORK/legacy.txt" 2>&1 )
-awk '
-	/coverage:/ {
-		value = $5
-		sub(/%/, "", value)
-		if ((value + 0) < 85) { failed = 1 }
-	}
-	END { exit failed }
-' "$WORK/legacy.txt"
-legacy_rc=$?
-if [ "$legacy_rc" -eq 0 ]; then
-	report yes "(a') predecessor awk gate PASSED the same module (hole confirmed)" ""
-else
-	report no "(a') predecessor awk gate PASSED the same module" "legacy awk exited $legacy_rc; the reproduction no longer reproduces"
-fi
+# A package whose test covers `covered` of `total` statements.
+add_ratio_package() {
+  local dir="$1" name="$2" total="$3" covered="$4"
+  mkdir -p "$dir/$name"
+  {
+    printf 'package %s\n\n' "$name"
+    for i in $(seq 1 "$total"); do printf 'func F%d() int { return %d }\n' "$i" "$i"; done
+  } >"$dir/$name/code.go"
+  {
+    printf 'package %s\n\nimport "testing"\n\n' "$name"
+    printf 'func TestCovered(t *testing.T) {\n\tsum := 0\n'
+    for i in $(seq 1 "$covered"); do printf '\tsum += F%d()\n' "$i"; done
+    printf '\tif sum == 0 {\n\t\tt.Fatal("no work")\n\t}\n}\n'
+  } >"$dir/$name/code_test.go"
+}
 
-# ---------------------------------------------------------------- (b) NEGATIVE
-d="$(new_module below-floor)"
-covered_pkg "$d" good
-mkdir -p "$d/thin"
+# ---------------------------------------------------------------------------
+# POSITIVE CONTROL - a clean module passes. Without this, a gate that failed
+# every input would score perfectly on the negative cases below.
+# ---------------------------------------------------------------------------
+DIR="$(new_module clean)"
+add_good_package "$DIR" alpha
+add_good_package "$DIR" beta
+run_gate "$DIR" --floor 85
+expect_status "clean module passes" 0
+expect_output "clean module passes" "units_measured=2"
+expect_output "clean module passes" "minimum_module_coverage=90.0%"
+expect_output "clean module passes" "go-coverage-gate: PASS"
+pass "clean module at 90% passes the 85% floor and reports units_measured=2"
+
+# ---------------------------------------------------------------------------
+# The reported number is the MINIMUM, never the average. Two packages at 90%
+# and 50% average to 70%, which is above nothing that matters - the 50% package
+# must fail on its own.
+# ---------------------------------------------------------------------------
+DIR="$(new_module belowfloor)"
+add_good_package "$DIR" alpha
+add_ratio_package "$DIR" bravo 10 5
+run_gate "$DIR" --floor 85
+expect_status "sub-floor package fails" 1
+expect_output "sub-floor package fails" "50.0%   belowfloor/bravo"
+expect_output "sub-floor package fails" "[5 of 10 statements, floor 85%]"
+expect_output "sub-floor package fails" "minimum_module_coverage=50.0%"
+expect_output "sub-floor package fails" "packages_below_floor=1"
+expect_output "sub-floor package fails" "units_measured=2"
+# The compliant sibling must still be reported. A gate that only prints failures
+# cannot be audited for completeness.
+expect_output "sub-floor package fails" "90.0%   belowfloor/alpha"
+pass "a single sub-floor package fails the run while its 90% sibling still reports"
+
+# ---------------------------------------------------------------------------
+# ESCAPE HATCH (b) - MISSING ROW. A package with no test files must APPEAR at
+# 0.0% and FAIL. This is the defect the previous awk gate carried: its rule body
+# fired only on /coverage:/ lines, so `?  pkg  [no test files]` was invisible.
+# ---------------------------------------------------------------------------
+DIR="$(new_module notests)"
+add_good_package "$DIR" alpha
+mkdir -p "$DIR/orphan"
 {
-	printf 'package thin\n\nfunc Classify(x int) string {\n'
-	printf '\tif x > 100 {\n\t\treturn "big"\n\t}\n'
-	printf '\tif x > 50 {\n\t\treturn "medium"\n\t}\n'
-	printf '\tif x > 10 {\n\t\treturn "small"\n\t}\n'
-	printf '\tif x > 0 {\n\t\treturn "tiny"\n\t}\n'
-	printf '\treturn "zero"\n}\n'
-} >"$d/thin/impl.go"
-printf 'package thin\n\nimport "testing"\n\nfunc TestClassify(t *testing.T) {\n\tif Classify(200) != "big" {\n\t\tt.Fatal("big")\n\t}\n}\n' >"$d/thin/impl_test.go"
-out="$("$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-	report no "(b) below-floor package fails" "gate exited 0 on a sub-floor package"
-elif ! printf '%s' "$out" | grep -q 'BELOW FLOOR'; then
-	report no "(b) below-floor package fails" "no BELOW FLOOR row emitted"
-else
-	report yes "(b) below-floor package fails" ""
-fi
+  printf 'package orphan\n\n'
+  printf 'func Add(a, b int) int {\n\tif a > b {\n\t\treturn a + b\n\t}\n\treturn a - b\n}\n'
+} >"$DIR/orphan/code.go"
+run_gate "$DIR" --floor 85
+expect_status "test-less package fails" 1
+expect_output "test-less package fails" "0.0%   notests/orphan"
+expect_output "test-less package fails" "[NO TEST FILES: 0 of"
+expect_output "test-less package fails" "units_measured=2"
+expect_output "test-less package fails" "minimum_module_coverage=0.0%"
+pass "a package with no test files appears in the report at 0.0% and fails"
 
-# ---------------------------------------------------------------- (c) NEGATIVE
-d="$(new_module zero-packages)"
-out="$("$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-	report no "(c) zero packages fails" "gate exited 0 on an empty module"
-elif ! printf '%s' "$out" | grep -q 'units_measured=0'; then
-	report no "(c) zero packages fails" "units_measured=0 not emitted"
-else
-	report yes "(c) zero packages fails with units_measured=0" ""
-fi
+# The same package under the OLD awk rule body, to prove the case is real and
+# that the old shape genuinely let it through.
+printf '?   \tnotests/orphan\t[no test files]\n' >"$TMP_ROOT/legacy.txt"
+set +e
+awk '/coverage:/ { v = $5; sub(/%/, "", v); if ((v + 0) < 85) { failed = 1 } } END { exit failed }' \
+  "$TMP_ROOT/legacy.txt" >/dev/null 2>&1
+LEGACY_STATUS=$?
+set -e
+[[ "$LEGACY_STATUS" -eq 0 ]] || fail "legacy control: the retired awk rule was expected to pass this line"
+pass "negative control: the retired awk rule body exits 0 on the very line the new gate fails"
 
-# ---------------------------------------------------------------- (d) POSITIVE
-d="$(new_module all-good)"
-covered_pkg "$d" alpha
-covered_pkg "$d" beta
-covered_pkg "$d" gamma
-out="$("$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-	report no "(d) fully covered module passes" "gate exited $rc on a compliant module: $out"
-elif ! printf '%s' "$out" | grep -q 'units_measured=3'; then
-	report no "(d) fully covered module passes" "expected units_measured=3"
-elif ! printf '%s' "$out" | grep -q 'minimum=100.0%'; then
-	# Pins the fixture's own coverage. Cases (f') and (g) rely on covered_pkg
-	# landing above 90; without this assertion a change to the fixture would
-	# silently turn those positive controls into false negatives.
-	report no "(d) fully covered module passes" "fixture coverage drifted; expected minimum=100.0%"
-else
-	report yes "(d) fully covered module passes (gate is calibrated)" ""
-fi
+# ---------------------------------------------------------------------------
+# ESCAPE HATCH (a) - EMPTY REPORT. Measuring zero packages is a hard failure.
+# ---------------------------------------------------------------------------
+DIR="$(new_module emptymod)"
+run_gate "$DIR" --floor 85
+expect_status "empty package set fails" 1
+expect_output "empty package set fails" "units_measured=0"
+expect_no_output "empty package set fails" "go-coverage-gate: PASS"
+pass "a module with zero packages hard-fails instead of exiting 0 over an empty set"
 
-# ---------------------------------------------------------------- (e) NEGATIVE
-d="$(new_module failing-tests)"
-covered_pkg "$d" good
-mkdir -p "$d/broken"
-printf 'package broken\n\nfunc Double(x int) int {\n\treturn x * 2\n}\n' >"$d/broken/impl.go"
-printf 'package broken\n\nimport "testing"\n\nfunc TestDouble(t *testing.T) {\n\tif Double(2) != 4 {\n\t\tt.Fatal("math")\n\t}\n\tt.Fatal("deliberate failure at 100%% coverage")\n}\n' >"$d/broken/impl_test.go"
-out="$("$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-	report no "(e) failing tests fail the gate" "gate exited 0 while a package's tests failed"
-elif ! printf '%s' "$out" | grep -q 'TESTS FAILED'; then
-	report no "(e) failing tests fail the gate" "no TESTS FAILED row emitted"
-else
-	report yes "(e) failing tests fail the gate even at high coverage" ""
-fi
+# ---------------------------------------------------------------------------
+# The rounding trap. 288 of 339 statements is 84.9558%, which `go test -cover`
+# PRINTS as "85.0%". A gate that parses the printed string passes it; a gate
+# that compares integers fails it. This is the case that separates the two.
+# ---------------------------------------------------------------------------
+DIR="$(new_module roundmod)"
+add_ratio_package "$DIR" edge 339 288
+PRINTED="$( (cd "$DIR" && GOFLAGS= go test -count=1 -cover ./...) 2>&1 || true)"
+case "$PRINTED" in
+  *"85.0% of statements"*) : ;;
+  *) fail "rounding trap: go test -cover did not print 85.0% for 288/339; it printed: $PRINTED" ;;
+esac
+run_gate "$DIR" --floor 85
+expect_status "rounding trap fails" 1
+expect_output "rounding trap fails" "roundmod/edge"
+expect_output "rounding trap fails" "288 of 339 statements"
+pass "288/339 prints as 85.0% but fails the integer comparison"
 
-# ---------------------------------------------------------------- (f) NEGATIVE
-d="$(new_module floor-override)"
-covered_pkg "$d" alpha
-out="$(COVERAGE_FLOOR=50 "$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -eq 0 ]; then
-	report no "(f) sub-floor COVERAGE_FLOOR rejected" "gate honoured a floor of 50"
-elif ! printf '%s' "$out" | grep -q 'below the immutable fleet floor'; then
-	report no "(f) sub-floor COVERAGE_FLOOR rejected" "wrong rejection reason: $out"
-else
-	report yes "(f) sub-floor COVERAGE_FLOOR rejected, never honoured" ""
-fi
+# ---------------------------------------------------------------------------
+# Test integrity. A skipped test is not a passing test.
+# ---------------------------------------------------------------------------
+DIR="$(new_module skipmod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/skip_test.go" <<'EOF'
+package alpha
 
-out="$(COVERAGE_FLOOR=90 "$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'floor=90%'; then
-	report yes "(f') COVERAGE_FLOOR may RAISE the floor" ""
-else
-	report no "(f') COVERAGE_FLOOR may RAISE the floor" "raising to 90 did not take effect (rc=$rc)"
-fi
+import "testing"
 
-# ---------------------------------------------------------------- (g) POSITIVE
-d="$(new_module tested-no-statements)"
-covered_pkg "$d" alpha
-mkdir -p "$d/decls"
-printf 'package decls\n\ntype Kind struct {\n\tName string\n}\n' >"$d/decls/types.go"
-printf 'package decls\n\nimport "testing"\n\nfunc TestKind(t *testing.T) {\n\tif (Kind{Name: "x"}).Name != "x" {\n\t\tt.Fatal("field")\n\t}\n}\n' >"$d/decls/types_test.go"
-out="$("$GATE" "$d" 2>&1)"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-	report no "(g) tested no-statements package passes" "gate exited $rc: $out"
-elif ! printf '%s' "$out" | grep -q '\[no statements\]'; then
-	report no "(g) tested no-statements package passes" "not classified as [no statements]"
-else
-	report yes "(g) tested no-statements package passes (no false failure)" ""
-fi
+func TestSkipped(t *testing.T) {
+	t.Skip("deliberately skipped")
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "skipped test fails" 1
+expect_output "skipped test fails" "SKIPPED TEST"
+expect_output "skipped test fails" "TestSkipped"
+pass "a skipped test fails the run even though coverage is above the floor"
 
-printf '\n----------------------------------------\n'
-printf 'go-coverage-gate controls: %d passed, %d failed\n' "$pass_count" "$fail_count"
-[ "$fail_count" -eq 0 ] || exit 1
-printf 'All controls green.\n'
+# ---------------------------------------------------------------------------
+DIR="$(new_module failmod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/fail_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func TestBroken(t *testing.T) {
+	t.Fatal("deliberate failure")
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "failing test fails" 1
+expect_output "failing test fails" "FAILING TEST"
+expect_output "failing test fails" "TestBroken"
+pass "a failing test fails the run and is named in the report"
+
+# ---------------------------------------------------------------------------
+DIR="$(new_module assertmod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/hollow_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func TestHollow(t *testing.T) {
+	_ = F1()
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "assertion-free test fails" 1
+expect_output "assertion-free test fails" "ASSERTION-FREE TEST"
+expect_output "assertion-free test fails" "TestHollow"
+pass "a test that never references its *testing.T parameter fails the run"
+
+# The assertion detector must use Go syntax, not raw source text. Comments and
+# strings cannot count as testing.T references; legal spaces cannot hide a test
+# signature; and a brace at column one inside a raw string cannot terminate a
+# parsed function body early.
+DIR="$(new_module parsermod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/parser_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func TestCommentOnly(t *testing.T) {
+	// t
+}
+
+func TestQuotedOnly(t *testing.T) {
+	_ = "t"
+}
+
+func TestRawOnly(t *testing.T) {
+	_ = `t
+}`
+}
+
+func TestSpaced ( t * testing.T ) {
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "parser rejects comment string raw-string and spaced hollow tests" 1
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestCommentOnly"
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestQuotedOnly"
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestRawOnly"
+expect_output "parser rejects comment string raw-string and spaced hollow tests" "TestSpaced"
+pass "Go-parser integrity rejects raw-text bypasses and legal spaced syntax"
+
+# Over-block controls: nested blocks and a raw-string brace remain syntactic
+# content, helper delegation passes t, and a conditional panic is a real failure
+# path even though it does not need testing.T.
+DIR="$(new_module parserpositive)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/parser_positive_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func helper(t *testing.T) {
+	t.Helper()
+}
+
+func TestNested(t *testing.T) {
+	if true {
+		_ = `
+}`
+		helper(t)
+	}
+}
+
+func TestPanicPath(t *testing.T) {
+	if F1() == 0 {
+		panic("real failure path")
+	}
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "parser over-block controls pass" 0
+expect_no_output "parser over-block controls pass" "ASSERTION-FREE TEST"
+pass "nested raw strings helper delegation and panic failure paths stay valid"
+
+# A _test.go filename is not an executed test. The package has a test file and
+# full initialization coverage, but no test event, so it must fail.
+DIR="$(new_module noexecutedmod)"
+mkdir -p "$DIR/alpha"
+cat >"$DIR/alpha/code.go" <<'EOF'
+package alpha
+
+func Value() int { return 1 }
+
+func init() { _ = Value() }
+EOF
+printf 'package alpha\n' >"$DIR/alpha/empty_test.go"
+run_gate "$DIR" --floor 85
+expect_status "zero executed tests fail" 1
+expect_output "zero executed tests fail" "NO TEST EXECUTED"
+pass "a package with only an empty _test.go file cannot pass"
+
+# Caller GOFLAGS cannot focus the suite. The gate neutralizes it, so the test
+# that a focused command would hide actually runs and fails.
+DIR="$(new_module focusedmod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/focus_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func TestFocused(t *testing.T) {
+	if F1() == 0 { t.Fatal("bad") }
+}
+
+func TestUnfocused(t *testing.T) {
+	t.Fatal("must not be hidden by GOFLAGS")
+}
+EOF
+GOFLAGS=-run=TestFocused run_gate "$DIR" --floor 85
+expect_status "focused caller flags cannot hide a test" 1
+expect_output "focused caller flags cannot hide a test" "TestUnfocused"
+pass "caller GOFLAGS focus is neutralized before discovery and execution"
+
+# The second go list is a required assertion-file enumeration, not a best-effort
+# convenience. A wrapper fails only that form while preserving the denominator.
+DIR="$(new_module enumerationmod)"
+add_good_package "$DIR" alpha
+mkdir -p "$DIR/fakebin"
+REAL_GO="$(command -v go)"
+cat >"$DIR/fakebin/go" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "list" && "\$2" == "-f" && "\$3" == *'.Dir'* ]]; then
+  exit 73
+fi
+exec "$REAL_GO" "\$@"
+EOF
+chmod +x "$DIR/fakebin/go"
+run_gate_with_path "$DIR" "$DIR/fakebin:$PATH" --floor 85
+expect_status "assertion-file enumeration failure fails closed" 1
+expect_output "assertion-file enumeration failure fails closed" "test-file enumeration failed"
+pass "an assertion-file enumeration error cannot disappear behind a pipeline"
+
+# The scratch root is fixed below the physical checkout and refuses a symlink,
+# so allocation and cleanup cannot follow it outside the module.
+DIR="$(new_module scratchmod)"
+add_good_package "$DIR" alpha
+mkdir -p "$DIR/outside"
+ln -s "$DIR/outside" "$DIR/.coverage-gate-work"
+run_gate "$DIR" --floor 85
+expect_status "symlink scratch root is rejected" 2
+expect_output "symlink scratch root is rejected" "scratch root must not be a symlink"
+pass "scratch allocation refuses a symlink before creating or removing a leaf"
+
+# OVER-BLOCK CONTROL for the same detector: a test that delegates its checking
+# to a helper still passes t, and must NOT be reported.
+DIR="$(new_module delegatemod)"
+add_good_package "$DIR" alpha
+cat >"$DIR/alpha/delegate_test.go" <<'EOF'
+package alpha
+
+import "testing"
+
+func requireNonZero(t *testing.T, got int) {
+	t.Helper()
+	if got == 0 {
+		t.Fatalf("got %d", got)
+	}
+}
+
+func TestDelegates(t *testing.T) {
+	requireNonZero(t, F1())
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "delegating test passes" 0
+expect_no_output "delegating test passes" "ASSERTION-FREE TEST"
+pass "over-block control: a test that delegates assertions to a helper is not flagged"
+
+# ---------------------------------------------------------------------------
+# OVER-BLOCK CONTROL. A package with no coverable statements but with a test
+# must be reported and must PASS. The retired awk gate false-failed exactly this
+# shape: `coverage: [no statements]` parsed to the token "[no" and became 0%.
+# ---------------------------------------------------------------------------
+DIR="$(new_module nostmtmod)"
+add_good_package "$DIR" alpha
+mkdir -p "$DIR/consts"
+cat >"$DIR/consts/consts.go" <<'EOF'
+package consts
+
+const Answer = 42
+
+type Thing struct{ Name string }
+EOF
+cat >"$DIR/consts/consts_test.go" <<'EOF'
+package consts
+
+import "testing"
+
+func TestAnswer(t *testing.T) {
+	if Answer != 42 {
+		t.Fatal("bad")
+	}
+}
+EOF
+run_gate "$DIR" --floor 85
+expect_status "statement-less package passes" 0
+expect_output "statement-less package passes" "nostmtmod/consts"
+expect_output "statement-less package passes" "no coverable statements"
+expect_output "statement-less package passes" "packages_with_no_coverable_statements=1"
+expect_output "statement-less package passes" "units_measured=2"
+pass "over-block control: a tested package with no coverable statements is reported and passes"
+
+# The retired awk rule failed that same shape, naming the wrong thing.
+printf 'ok  \tnostmtmod/consts\t0.170s\tcoverage: [no statements]\n' >"$TMP_ROOT/legacy2.txt"
+set +e
+awk '/coverage:/ { v = $5; sub(/%/, "", v); if ((v + 0) < 85) { failed = 1 } } END { exit failed }' \
+  "$TMP_ROOT/legacy2.txt" >/dev/null 2>&1
+LEGACY2_STATUS=$?
+set -e
+[[ "$LEGACY2_STATUS" -eq 1 ]] || fail "legacy control: the retired awk rule was expected to false-fail this line"
+pass "negative control: the retired awk rule false-failed a fully tested statement-less package"
+
+# ---------------------------------------------------------------------------
+# Floor validation. A consumer may RAISE the fleet floor, never lower it, and a
+# bad floor must be rejected BEFORE any measurement runs.
+# ---------------------------------------------------------------------------
+DIR="$(new_module floormod)"
+add_ratio_package "$DIR" alpha 100 86
+
+run_gate "$DIR" --floor 84
+expect_status "floor below fleet floor is rejected" 2
+expect_output "floor below fleet floor is rejected" "below the fleet floor"
+expect_no_output "floor below fleet floor is rejected" "units_measured"
+pass "a floor of 84 is rejected before any measurement runs"
+
+run_gate "$DIR" --floor notanumber
+expect_status "non-numeric floor is rejected" 2
+expect_output "non-numeric floor is rejected" "must be a whole number"
+pass "a non-numeric floor is rejected"
+
+run_gate "$DIR" --floor 101
+expect_status "floor above 100 is rejected" 2
+expect_output "floor above 100 is rejected" "exceeds 100"
+pass "a floor above 100 is rejected"
+
+run_gate "$DIR" --floor 85
+expect_status "default fleet floor passes" 0
+expect_output "default fleet floor passes" "floor=85% (fleet floor 85%)"
+pass "an 86.0% package passes at the 85% fleet floor"
+
+run_gate "$DIR" --floor 90
+expect_status "raised floor is enforced" 1
+expect_output "raised floor is enforced" "floor=90% (fleet floor 85%)"
+expect_output "raised floor is enforced" "floor 90%"
+expect_output "raised floor is enforced" "packages_below_floor=1"
+pass "the same 86.0% package fails once the consumer raises the floor to 90"
+
+COVERAGE_FLOOR=90 run_gate_legacy_interface "$DIR"
+expect_status "legacy positional interface and COVERAGE_FLOOR are enforced" 1
+expect_output "legacy positional interface and COVERAGE_FLOOR are enforced" "floor=90% (fleet floor 85%)"
+pass "the existing positional module interface and COVERAGE_FLOOR override remain enforced"
+
+# Exactly at the floor passes. An off-by-one at the boundary would either fail
+# compliant work or admit non-compliant work, and both are silent.
+DIR="$(new_module boundarymod)"
+add_ratio_package "$DIR" alpha 100 85
+run_gate "$DIR" --floor 85
+expect_status "exactly at the floor passes" 0
+expect_output "exactly at the floor passes" "minimum_module_coverage=85.0%"
+pass "a package at exactly 85.0% passes the 85% floor"
+
+add_ratio_package "$DIR" bravo 100 84
+run_gate "$DIR" --floor 85
+expect_status "one below the floor fails" 1
+expect_output "one below the floor fails" "84.0%   boundarymod/bravo"
+expect_output "one below the floor fails" "packages_below_floor=1"
+pass "a package one statement below the floor fails while its boundary sibling passes"
+
+printf '\n%d checks passed\n' "$PASS_COUNT"
