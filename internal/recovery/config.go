@@ -465,7 +465,7 @@ func (cfg DiscoveryConfig) validate() error {
 	if cfg.MaxQueryTerms < 1 || cfg.MaxQueryTerms > 8 || cfg.MinTokenLength < 2 || cfg.MinTokenLength > 32 {
 		return errors.New("query term limits are outside the supported bounds")
 	}
-	allowedFields := map[string]struct{}{"task_id": {}, "title": {}, "note": {}, "pillar": {}, "owner": {}, "level": {}}
+	allowedFields := map[string]struct{}{"task_id": {}, "title": {}, "note": {}, "pillar": {}, "repo": {}, "owner": {}, "level": {}}
 	seenFields := make(map[string]struct{}, len(cfg.QueryFields))
 	for _, field := range cfg.QueryFields {
 		if _, ok := allowedFields[field]; !ok {

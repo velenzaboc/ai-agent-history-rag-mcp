@@ -282,7 +282,11 @@ func (service *Service) RelatedWork(ctx context.Context, taskID string) (Related
 	searchCandidates := make([]Task, 0, len(taskSearchOutcome.tasks))
 	seenTasks := make(map[string]struct{}, len(taskSearchOutcome.tasks))
 	for _, candidate := range taskSearchOutcome.tasks {
-		if candidate.TaskID == "" || candidate.TaskID == taskID {
+		if candidate.TaskID == taskID {
+			mergeTaskProjection(task, candidate)
+			continue
+		}
+		if candidate.TaskID == "" {
 			continue
 		}
 		if _, exists := seenTasks[candidate.TaskID]; exists {
@@ -418,6 +422,8 @@ func (service *Service) discoveryQuery(task Task) string {
 			values = append(values, task.Note)
 		case "pillar":
 			values = append(values, task.Pillar)
+		case "repo":
+			values = append(values, task.Repo)
 		case "owner":
 			values = append(values, task.Owner)
 		case "level":
@@ -439,6 +445,15 @@ func (service *Service) discoveryQuery(task Task) string {
 		}
 	}
 	return strings.Join(terms, " ")
+}
+
+func mergeTaskProjection(target *Task, source Task) {
+	if target.Repo == "" {
+		target.Repo = source.Repo
+	}
+	if target.SessionID == "" {
+		target.SessionID = source.SessionID
+	}
 }
 
 func (service *Service) discoveryTokens(value string) []string {

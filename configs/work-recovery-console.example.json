@@ -79,7 +79,7 @@
     "search_files": true,
     "max_query_terms": 8,
     "min_token_length": 3,
-    "query_fields": ["title", "note", "pillar", "task_id"],
+    "query_fields": ["title", "note", "pillar", "repo", "task_id"],
     "stop_words": ["and", "build", "create", "for", "implement", "implementation", "read", "task", "the", "this", "with", "work"],
     "weights": {
       "search_hit": 0,
