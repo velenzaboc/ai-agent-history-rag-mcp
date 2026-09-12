@@ -30,19 +30,23 @@ type HistorySource interface {
 }
 
 type MCPFleetClient struct {
-	config FleetConfig
-	client *http.Client
-	nextID atomic.Int64
+	config         FleetConfig
+	activeStatuses []string
+	client         *http.Client
+	nextID         atomic.Int64
 }
 
-func NewMCPFleetClient(config FleetConfig, timeout time.Duration) (*MCPFleetClient, error) {
+func NewMCPFleetClient(config FleetConfig, activeStatuses []string, timeout time.Duration) (*MCPFleetClient, error) {
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("fleet client config: %w", err)
 	}
 	if timeout <= 0 {
 		return nil, errors.New("fleet client timeout must be positive")
 	}
-	return &MCPFleetClient{config: config, client: boundedHTTPClient(timeout)}, nil
+	if config.TasksTool != "" && len(activeStatuses) == 0 {
+		return nil, errors.New("fleet active overlay requires at least one active status")
+	}
+	return &MCPFleetClient{config: config, activeStatuses: append([]string(nil), activeStatuses...), client: boundedHTTPClient(timeout)}, nil
 }
 
 func (client *MCPFleetClient) Snapshot(ctx context.Context) (FleetSnapshot, error) {
@@ -54,40 +58,120 @@ func (client *MCPFleetClient) Snapshot(ctx context.Context) (FleetSnapshot, erro
 	if client.config.RootTaskID != "" {
 		arguments["root_task_id"] = client.config.RootTaskID
 	}
+	if client.config.TasksTool == "" {
+		var snapshot FleetSnapshot
+		if err := client.callTool(ctx, client.config.SnapshotTool, arguments, &snapshot); err != nil {
+			return FleetSnapshot{}, err
+		}
+		if err := client.finishSnapshot(&snapshot, nil); err != nil {
+			return FleetSnapshot{}, err
+		}
+		return snapshot, nil
+	}
+	type snapshotResult struct {
+		snapshot FleetSnapshot
+		err      error
+	}
+	type tasksResult struct {
+		result taskListResult
+		err    error
+	}
+	snapshotChannel := make(chan snapshotResult, 1)
+	tasksChannel := make(chan tasksResult, 1)
+	go func() {
+		var snapshot FleetSnapshot
+		err := client.callTool(ctx, client.config.SnapshotTool, arguments, &snapshot)
+		snapshotChannel <- snapshotResult{snapshot: snapshot, err: err}
+	}()
+	go func() {
+		var result taskListResult
+		err := client.callTool(ctx, client.config.TasksTool, map[string]any{
+			"project_id": client.config.ProjectID,
+			"statuses":   client.activeStatuses,
+			"limit":      client.config.ActiveLimit,
+		}, &result)
+		tasksChannel <- tasksResult{result: result, err: err}
+	}()
+	snapshotOutcome := <-snapshotChannel
+	tasksOutcome := <-tasksChannel
+	if snapshotOutcome.err != nil {
+		return FleetSnapshot{}, snapshotOutcome.err
+	}
+	if tasksOutcome.err != nil {
+		return FleetSnapshot{}, fmt.Errorf("read active task overlay: %w", tasksOutcome.err)
+	}
+	if err := client.finishSnapshot(&snapshotOutcome.snapshot, tasksOutcome.result.Tasks); err != nil {
+		return FleetSnapshot{}, err
+	}
+	return snapshotOutcome.snapshot, nil
+}
+
+type taskListResult struct {
+	Tasks []Task `json:"tasks"`
+}
+
+func (client *MCPFleetClient) finishSnapshot(snapshot *FleetSnapshot, activeTasks []Task) error {
+	if snapshot.ProjectID != client.config.ProjectID {
+		return fmt.Errorf("fleet snapshot project %q does not match configured project", snapshot.ProjectID)
+	}
+	snapshot.SnapshotTasks = len(snapshot.Tasks)
+	byID := make(map[string]int, len(snapshot.Tasks))
+	for index := range snapshot.Tasks {
+		snapshot.Tasks[index].Projection = "snapshot"
+		byID[snapshot.Tasks[index].TaskID] = index
+	}
+	for _, task := range activeTasks {
+		if task.ProjectID != "" && task.ProjectID != client.config.ProjectID {
+			return fmt.Errorf("active task %q belongs to unexpected project %q", task.TaskID, task.ProjectID)
+		}
+		if index, exists := byID[task.TaskID]; exists {
+			task.Projection = "snapshot+active_overlay"
+			snapshot.Tasks[index] = task
+			continue
+		}
+		task.Projection = "active_overlay"
+		byID[task.TaskID] = len(snapshot.Tasks)
+		snapshot.Tasks = append(snapshot.Tasks, task)
+	}
+	snapshot.ActiveTasks = len(activeTasks)
+	return nil
+}
+
+func (client *MCPFleetClient) callTool(ctx context.Context, toolName string, arguments map[string]any, output any) error {
 	requestBody := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      client.nextID.Add(1),
 		"method":  "tools/call",
 		"params": map[string]any{
-			"name":      client.config.SnapshotTool,
+			"name":      toolName,
 			"arguments": arguments,
 		},
 	}
 	payload, err := json.Marshal(requestBody)
 	if err != nil {
-		return FleetSnapshot{}, fmt.Errorf("encode fleet request: %w", err)
+		return fmt.Errorf("encode fleet request: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.config.Endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return FleetSnapshot{}, fmt.Errorf("construct fleet request: %w", err)
+		return fmt.Errorf("construct fleet request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	response, err := client.client.Do(request)
 	if err != nil {
-		return FleetSnapshot{}, fmt.Errorf("fleet request: %w", err)
+		return fmt.Errorf("fleet request: %w", err)
 	}
 	defer response.Body.Close()
 	body, err := readBounded(response.Body, client.config.MaxResponseBytes)
 	if err != nil {
-		return FleetSnapshot{}, fmt.Errorf("read fleet response: %w", err)
+		return fmt.Errorf("read fleet response: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return FleetSnapshot{}, fmt.Errorf("fleet response status %d", response.StatusCode)
+		return fmt.Errorf("fleet response status %d", response.StatusCode)
 	}
 	rpcPayload, err := streamableJSON(body, response.Header.Get("Content-Type"))
 	if err != nil {
-		return FleetSnapshot{}, fmt.Errorf("decode fleet transport: %w", err)
+		return fmt.Errorf("decode fleet transport: %w", err)
 	}
 	var envelope struct {
 		Error *struct {
@@ -104,13 +188,13 @@ func (client *MCPFleetClient) Snapshot(ctx context.Context) (FleetSnapshot, erro
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(rpcPayload, &envelope); err != nil {
-		return FleetSnapshot{}, fmt.Errorf("decode fleet RPC: %w", err)
+		return fmt.Errorf("decode fleet RPC: %w", err)
 	}
 	if envelope.Error != nil {
-		return FleetSnapshot{}, fmt.Errorf("fleet RPC %d: %s", envelope.Error.Code, envelope.Error.Message)
+		return fmt.Errorf("fleet RPC %d: %s", envelope.Error.Code, envelope.Error.Message)
 	}
 	if envelope.Result.IsError {
-		return FleetSnapshot{}, errors.New("fleet tool returned an error")
+		return errors.New("fleet tool returned an error")
 	}
 	structured := envelope.Result.StructuredContent
 	if len(structured) == 0 {
@@ -122,16 +206,12 @@ func (client *MCPFleetClient) Snapshot(ctx context.Context) (FleetSnapshot, erro
 		}
 	}
 	if len(structured) == 0 {
-		return FleetSnapshot{}, errors.New("fleet response has no structured content")
+		return errors.New("fleet response has no structured content")
 	}
-	var snapshot FleetSnapshot
-	if err := json.Unmarshal(structured, &snapshot); err != nil {
-		return FleetSnapshot{}, fmt.Errorf("decode fleet snapshot: %w", err)
+	if err := json.Unmarshal(structured, output); err != nil {
+		return fmt.Errorf("decode fleet tool %s: %w", toolName, err)
 	}
-	if snapshot.ProjectID != client.config.ProjectID {
-		return FleetSnapshot{}, fmt.Errorf("fleet snapshot project %q does not match configured project", snapshot.ProjectID)
-	}
-	return snapshot, nil
+	return nil
 }
 
 type LegacyHistoryClient struct {

@@ -33,11 +33,28 @@ func TestBuildDashboardLinksExactSessionsAndClassifiesOldOrphans(t *testing.T) {
 	if len(dashboard.Relationships) != 1 || dashboard.Relationships[0].Kind != "exact" {
 		t.Fatalf("unexpected relationships: %#v", dashboard.Relationships)
 	}
-	if !hasFinding(dashboard.Findings, "orphan_session", "", "00000000-0000-0000-0000-000000000002") {
+	if !hasFinding(dashboard.Findings, "abandoned_session", "", "00000000-0000-0000-0000-000000000002") {
 		t.Fatalf("old orphan classification missing: %#v", dashboard.Findings)
 	}
 	if !hasFinding(dashboard.Findings, "unlinked_task", "T-2", "") {
 		t.Fatalf("unlinked task classification missing: %#v", dashboard.Findings)
+	}
+}
+
+func TestBuildDashboardDoesNotInferMissingWorklinkForOverlayOnlyTask(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{snapshot: FleetSnapshot{ProjectID: "project-a", Tasks: []Task{{TaskID: "T-1", Title: "Current task", Status: "in_progress", Projection: "active_overlay", UpdatedAt: now}}}}
+	service, err := NewService(cfg, fleet, stubHistory{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := service.Dashboard(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasFinding(dashboard.Findings, "unlinked_task", "T-1", "") {
+		t.Fatalf("overlay-only task was treated as proof of a missing worklink: %#v", dashboard.Findings)
 	}
 }
 

@@ -19,6 +19,8 @@ type FleetSnapshot struct {
 	StoreType     string          `json:"store_type,omitempty"`
 	Tasks         []Task          `json:"tasks"`
 	Worklinks     []Worklink      `json:"worklinks"`
+	SnapshotTasks int             `json:"-"`
+	ActiveTasks   int             `json:"-"`
 }
 
 type Task struct {
@@ -27,12 +29,14 @@ type Task struct {
 	Level          string    `json:"level"`
 	Note           string    `json:"note"`
 	Owner          string    `json:"owner"`
+	ParentID       string    `json:"parent_id,omitempty"`
 	Pillar         string    `json:"pillar"`
 	ProjectID      string    `json:"project_id"`
 	Status         string    `json:"status"`
 	TaskID         string    `json:"task_id"`
 	Title          string    `json:"title"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	Projection     string    `json:"projection,omitempty"`
 }
 
 func (t *Task) UnmarshalJSON(payload []byte) error {
@@ -158,11 +162,14 @@ type Dashboard struct {
 }
 
 type Coverage struct {
-	FleetLimit      int  `json:"fleet_limit"`
-	HistoryLimit    int  `json:"history_limit"`
-	HistoryPartial  bool `json:"history_partial"`
-	HistoryProbed   int  `json:"history_probed"`
-	HistoryReturned int  `json:"history_returned"`
+	FleetLimit            int  `json:"fleet_limit"`
+	FleetSnapshotReturned int  `json:"fleet_snapshot_returned"`
+	ActiveTaskLimit       int  `json:"active_task_limit"`
+	ActiveTaskReturned    int  `json:"active_task_returned"`
+	HistoryLimit          int  `json:"history_limit"`
+	HistoryPartial        bool `json:"history_partial"`
+	HistoryProbed         int  `json:"history_probed"`
+	HistoryReturned       int  `json:"history_returned"`
 }
 
 type ResumePacket struct {

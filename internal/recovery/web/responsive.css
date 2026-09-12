@@ -1,3 +1,8 @@
+.graph-parent-edge {
+  stroke: color-mix(in srgb, var(--accent-alt) 34%, transparent);
+  stroke-dasharray: 4 3;
+}
+
 @media (min-width: 761px) and (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 202px minmax(0, 1fr);

@@ -49,9 +49,11 @@ type FleetConfig struct {
 	Endpoint         string `json:"endpoint"`
 	ProjectID        string `json:"project_id"`
 	SnapshotTool     string `json:"snapshot_tool"`
+	TasksTool        string `json:"tasks_tool"`
 	Scope            string `json:"scope"`
 	RootTaskID       string `json:"root_task_id"`
 	Limit            int    `json:"limit"`
+	ActiveLimit      int    `json:"active_limit"`
 	MaxResponseBytes int64  `json:"max_response_bytes"`
 }
 
@@ -246,6 +248,9 @@ func (cfg Config) validate() error {
 	if err := cfg.Status.validate(); err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
+	if cfg.Fleet.TasksTool != "" && len(cfg.Status.ActiveStatuses()) == 0 {
+		return errors.New("fleet active overlay requires at least one active status")
+	}
 	if err := cfg.View.validate(); err != nil {
 		return fmt.Errorf("view: %w", err)
 	}
@@ -262,8 +267,18 @@ func (cfg FleetConfig) validate() error {
 	if strings.TrimSpace(cfg.ProjectID) == "" || strings.TrimSpace(cfg.SnapshotTool) == "" || strings.TrimSpace(cfg.Scope) == "" {
 		return errors.New("project_id, snapshot_tool, and scope are required")
 	}
+	if !identifierPattern.MatchString(cfg.SnapshotTool) {
+		return errors.New("snapshot_tool is invalid")
+	}
 	if cfg.Limit < 1 || cfg.Limit > 100000 {
 		return errors.New("limit must be between 1 and 100000")
+	}
+	if cfg.TasksTool == "" {
+		if cfg.ActiveLimit != 0 {
+			return errors.New("active_limit must be zero when tasks_tool is disabled")
+		}
+	} else if !identifierPattern.MatchString(cfg.TasksTool) || cfg.ActiveLimit < 1 || cfg.ActiveLimit > 100000 {
+		return errors.New("tasks_tool and active_limit must define a valid active-task overlay")
 	}
 	return validateResponseLimit(cfg.MaxResponseBytes)
 }
@@ -357,7 +372,7 @@ func (cfg ClassificationConfig) validate() error {
 		}
 		seen[rule.ID] = struct{}{}
 	}
-	for _, required := range []string{"orphan_session", "stale_thread", "missing_history", "ambiguous_binding", "unlinked_task"} {
+	for _, required := range []string{"orphan_session", "abandoned_session", "stale_thread", "missing_history", "ambiguous_binding", "unlinked_task"} {
 		if _, ok := seen[required]; !ok {
 			return fmt.Errorf("classification rule %s is required", required)
 		}
@@ -395,6 +410,20 @@ func (cfg StatusConfig) validate() error {
 		}
 	}
 	return nil
+}
+
+func (cfg StatusConfig) ActiveStatuses() []string {
+	activeGroups := make(map[string]struct{}, len(cfg.ActiveGroupIDs))
+	for _, id := range cfg.ActiveGroupIDs {
+		activeGroups[id] = struct{}{}
+	}
+	statuses := make([]string, 0)
+	for _, group := range cfg.Groups {
+		if _, active := activeGroups[group.ID]; active {
+			statuses = append(statuses, group.Statuses...)
+		}
+	}
+	return statuses
 }
 
 func (cfg ViewConfig) validate() error {

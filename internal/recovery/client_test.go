@@ -19,7 +19,7 @@ func TestMCPFleetClientParsesStreamableHTTPEvent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", Scope: "project", Limit: 10, MaxResponseBytes: 1 << 20}, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", Scope: "project", Limit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,6 +29,51 @@ func TestMCPFleetClientParsesStreamableHTTPEvent(t *testing.T) {
 	}
 	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].TaskID != "T-1" || snapshot.Revision != "r1" {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
+	}
+}
+
+func TestMCPFleetClientOverlaysActiveTasksOutsideBoundedSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID     int64 `json:"id"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		var result any
+		switch request.Params.Name {
+		case "snapshot":
+			result = FleetSnapshot{ProjectID: "project-a", Tasks: []Task{{TaskID: "T-1", Title: "Old title", Status: "in_progress"}}}
+		case "tasks":
+			statuses, ok := request.Params.Arguments["statuses"].([]any)
+			if !ok || len(statuses) != 2 {
+				t.Fatalf("active statuses were not configured: %#v", request.Params.Arguments)
+			}
+			result = taskListResult{Tasks: []Task{{ProjectID: "project-a", TaskID: "T-1", Title: "Current title", Status: "in_progress"}, {ProjectID: "project-a", TaskID: "T-2", Title: "Outside cap", Status: "blocked"}}}
+		default:
+			t.Fatalf("unexpected tool %q", request.Params.Name)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"structuredContent": result}})
+	}))
+	defer server.Close()
+
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", TasksTool: "tasks", Scope: "project", Limit: 1, ActiveLimit: 10, MaxResponseBytes: 1 << 20}, []string{"in_progress", "blocked"}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.SnapshotTasks != 1 || snapshot.ActiveTasks != 2 || len(snapshot.Tasks) != 2 {
+		t.Fatalf("unexpected overlay coverage: %#v", snapshot)
+	}
+	if snapshot.Tasks[0].Title != "Current title" || snapshot.Tasks[0].Projection != "snapshot+active_overlay" || snapshot.Tasks[1].Projection != "active_overlay" {
+		t.Fatalf("unexpected overlay merge: %#v", snapshot.Tasks)
 	}
 }
 

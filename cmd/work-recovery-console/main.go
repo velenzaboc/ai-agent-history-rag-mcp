@@ -36,7 +36,7 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	fleet, err := recovery.NewMCPFleetClient(config.Fleet, config.RequestTimeout())
+	fleet, err := recovery.NewMCPFleetClient(config.Fleet, config.Status.ActiveStatuses(), config.RequestTimeout())
 	if err != nil {
 		return err
 	}

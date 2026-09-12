@@ -118,8 +118,10 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 		Revision:      fleetOutcome.snapshot.Revision,
 		ReadTimestamp: fleetOutcome.snapshot.ReadTimestamp,
 		Coverage: Coverage{
-			FleetLimit: service.config.Fleet.Limit, HistoryLimit: service.config.History.RecentLimit,
-			HistoryPartial: batch.Partial, HistoryProbed: probed, HistoryReturned: len(sessions),
+			FleetLimit: service.config.Fleet.Limit, FleetSnapshotReturned: fleetOutcome.snapshot.SnapshotTasks,
+			ActiveTaskLimit: service.config.Fleet.ActiveLimit, ActiveTaskReturned: fleetOutcome.snapshot.ActiveTasks,
+			HistoryLimit: service.config.History.RecentLimit, HistoryPartial: batch.Partial,
+			HistoryProbed: probed, HistoryReturned: len(sessions),
 		},
 		View: service.config.View, Status: service.config.Status, Classification: service.config.Classification,
 		Counts:  DashboardCounts{Tasks: len(fleetOutcome.snapshot.Tasks), Sessions: len(sessions), Relationships: len(relationships), Findings: len(findings), HighSeverity: high, Milestones: milestones},
@@ -454,11 +456,13 @@ func (service *Service) classify(now time.Time, snapshot FleetSnapshot, sessions
 		age := ageHours(now, session.Timestamp)
 		accepted := acceptedBySession[session.SessionID]
 		if len(accepted) == 0 {
+			kind := "orphan_session"
 			detail := "No accepted task relationship was derived from configured exact or strong evidence."
 			if age >= service.config.Classification.AbandonedAfterHours {
+				kind = "abandoned_session"
 				detail = "An old session has no accepted task relationship and is a recovery candidate."
 			}
-			findings = append(findings, configuredFinding(rules["orphan_session"], "orphan_session", "", session.SessionID, age, detail, session.Timestamp))
+			findings = append(findings, configuredFinding(rules[kind], kind, "", session.SessionID, age, detail, session.Timestamp))
 		}
 		if len(accepted) > 1 {
 			findings = append(findings, configuredFinding(rules["ambiguous_binding"], "ambiguous_binding", "", session.SessionID, age, "More than one task meets the configured acceptance score.", session.Timestamp))
@@ -483,7 +487,7 @@ func (service *Service) classify(now time.Time, snapshot FleetSnapshot, sessions
 		}
 	}
 	for _, task := range snapshot.Tasks {
-		if service.isActive(task.Status) && len(linksByTask[task.TaskID]) == 0 && len(acceptedByTask[task.TaskID]) == 0 {
+		if task.Projection != "active_overlay" && service.isActive(task.Status) && len(linksByTask[task.TaskID]) == 0 && len(acceptedByTask[task.TaskID]) == 0 {
 			findings = append(findings, configuredFinding(rules["unlinked_task"], "unlinked_task", task.TaskID, "", ageHours(now, task.UpdatedAt), "A non-terminal task has no durable work link in the bounded fleet snapshot.", task.UpdatedAt))
 		}
 	}
