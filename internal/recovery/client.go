@@ -22,6 +22,7 @@ type FleetSource interface {
 	Snapshot(context.Context) (FleetSnapshot, error)
 	ScopedSnapshot(context.Context, string, string, int) (FleetSnapshot, error)
 	Worklinks(context.Context, string) ([]Worklink, error)
+	SessionWorklinks(context.Context, string) ([]Worklink, error)
 	Search(context.Context, string, int) ([]Task, error)
 }
 
@@ -48,6 +49,85 @@ func (client *MCPFleetClient) Worklinks(ctx context.Context, taskID string) ([]W
 		}
 	}
 	return result.Worklinks, nil
+}
+
+func (client *MCPFleetClient) SessionWorklinks(ctx context.Context, sessionID string) ([]Worklink, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || len(sessionID) > 512 {
+		return nil, errors.New("session id is invalid")
+	}
+	var result struct {
+		Nodes []struct {
+			NodeID         string `json:"node_id"`
+			NodeKind       string `json:"node_kind"`
+			ProjectID      string `json:"project_id"`
+			CurrentVersion struct {
+				Contract json.RawMessage `json:"contract"`
+				Payload  json.RawMessage `json:"payload"`
+			} `json:"current_version"`
+		} `json:"nodes"`
+	}
+	if err := client.callTool(ctx, client.config.SearchTool, map[string]any{
+		"project_id": client.config.ProjectID,
+		"query":      sessionID,
+		"limit":      client.config.SessionLinkLimit,
+	}, &result); err != nil {
+		return nil, err
+	}
+	if len(result.Nodes) >= client.config.SessionLinkLimit {
+		return nil, fmt.Errorf("session worklink search reached its configured result bound of %d; exact coverage is unknown", client.config.SessionLinkLimit)
+	}
+	links := make([]Worklink, 0, len(result.Nodes))
+	seen := make(map[string]struct{}, len(result.Nodes))
+	for _, node := range result.Nodes {
+		if node.NodeKind != "artifact" {
+			continue
+		}
+		if node.NodeID == "" || (node.ProjectID != "" && node.ProjectID != client.config.ProjectID) {
+			return nil, errors.New("session worklink search returned an invalid artifact identity")
+		}
+		var contract struct {
+			ArtifactRef      string `json:"artifact_ref"`
+			ArtifactTypeKind string `json:"artifact_type_kind"`
+			ProjectID        string `json:"project_id"`
+		}
+		var payload struct {
+			TaskID         string `json:"task_id"`
+			Thread         string `json:"thread"`
+			Note           string `json:"note"`
+			ProjectID      string `json:"project_id"`
+			FleetCreatedAt string `json:"fleet_created_at"`
+		}
+		if err := json.Unmarshal(node.CurrentVersion.Contract, &contract); err != nil {
+			return nil, fmt.Errorf("decode session worklink contract %s: %w", node.NodeID, err)
+		}
+		if err := json.Unmarshal(node.CurrentVersion.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("decode session worklink payload %s: %w", node.NodeID, err)
+		}
+		if !strings.EqualFold(contract.ArtifactRef, sessionID) && !strings.EqualFold(payload.Thread, sessionID) {
+			continue
+		}
+		projectID := node.ProjectID
+		if projectID == "" {
+			projectID = contract.ProjectID
+		}
+		if projectID == "" {
+			projectID = payload.ProjectID
+		}
+		if projectID != client.config.ProjectID || payload.TaskID == "" || contract.ArtifactTypeKind == "" {
+			return nil, fmt.Errorf("session worklink %q has an invalid project, task, or artifact type", node.NodeID)
+		}
+		if _, exists := seen[node.NodeID]; exists {
+			continue
+		}
+		seen[node.NodeID] = struct{}{}
+		links = append(links, Worklink{
+			ArtifactID: node.NodeID, ArtifactRef: contract.ArtifactRef, ArtifactType: contract.ArtifactTypeKind,
+			CreatedAt: payload.FleetCreatedAt, Note: payload.Note, ProjectID: projectID, TaskID: payload.TaskID, Thread: payload.Thread,
+		})
+	}
+	sortWorklinks(links)
+	return links, nil
 }
 
 func (client *MCPFleetClient) Search(ctx context.Context, query string, limit int) ([]Task, error) {

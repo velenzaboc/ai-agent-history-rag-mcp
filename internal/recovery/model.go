@@ -172,6 +172,8 @@ type Dashboard struct {
 type Coverage struct {
 	FleetLimit            int  `json:"fleet_limit"`
 	FleetSnapshotReturned int  `json:"fleet_snapshot_returned"`
+	FleetWorklinksCapped  bool `json:"fleet_worklinks_capped"`
+	SessionLinksHydrated  int  `json:"session_links_hydrated"`
 	ActiveTaskLimit       int  `json:"active_task_limit"`
 	ActiveTaskReturned    int  `json:"active_task_returned"`
 	HistoryLimit          int  `json:"history_limit"`

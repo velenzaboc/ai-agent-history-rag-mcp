@@ -47,19 +47,21 @@ type AccessConfig struct {
 }
 
 type FleetConfig struct {
-	Mode             string `json:"mode"`
-	Endpoint         string `json:"endpoint"`
-	ProjectID        string `json:"project_id"`
-	SnapshotTool     string `json:"snapshot_tool"`
-	TasksTool        string `json:"tasks_tool"`
-	WorklinksTool    string `json:"worklinks_tool"`
-	SearchTool       string `json:"search_tool"`
-	Scope            string `json:"scope"`
-	RootTaskID       string `json:"root_task_id"`
-	Limit            int    `json:"limit"`
-	ActiveLimit      int    `json:"active_limit"`
-	TaskPromptLimit  int    `json:"task_prompt_limit"`
-	MaxResponseBytes int64  `json:"max_response_bytes"`
+	Mode                   string `json:"mode"`
+	Endpoint               string `json:"endpoint"`
+	ProjectID              string `json:"project_id"`
+	SnapshotTool           string `json:"snapshot_tool"`
+	TasksTool              string `json:"tasks_tool"`
+	WorklinksTool          string `json:"worklinks_tool"`
+	SearchTool             string `json:"search_tool"`
+	Scope                  string `json:"scope"`
+	RootTaskID             string `json:"root_task_id"`
+	Limit                  int    `json:"limit"`
+	ActiveLimit            int    `json:"active_limit"`
+	TaskPromptLimit        int    `json:"task_prompt_limit"`
+	SessionLinkLimit       int    `json:"session_link_limit"`
+	SessionLinkConcurrency int    `json:"session_link_concurrency"`
+	MaxResponseBytes       int64  `json:"max_response_bytes"`
 }
 
 type ProgramConfig struct {
@@ -344,6 +346,12 @@ func (cfg FleetConfig) validate() error {
 	}
 	if cfg.TaskPromptLimit < 1 || cfg.TaskPromptLimit > 100000 {
 		return errors.New("task_prompt_limit must be between 1 and 100000")
+	}
+	if cfg.SessionLinkLimit < 1 || cfg.SessionLinkLimit > 100 {
+		return errors.New("session_link_limit must be between 1 and 100")
+	}
+	if cfg.SessionLinkConcurrency < 1 || cfg.SessionLinkConcurrency > 16 {
+		return errors.New("session_link_concurrency must be between 1 and 16")
 	}
 	return validateResponseLimit(cfg.MaxResponseBytes)
 }

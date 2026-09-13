@@ -97,6 +97,16 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 		historyStatus.Error = historyOutcome.err.Error()
 		batch = HistoryBatch{Requested: service.config.History.RecentLimit, Partial: true}
 	}
+	worklinksCapped := snapshotCollectionCapped(fleetOutcome.snapshot, "worklinks")
+	sessionLinksHydrated := 0
+	if worklinksCapped && len(batch.Sessions) > 0 {
+		exactLinks, hydrated, err := service.hydrateSessionWorklinks(ctx, batch.Sessions)
+		if err != nil {
+			return Dashboard{}, fmt.Errorf("hydrate exact session worklinks: %w", err)
+		}
+		fleetOutcome.snapshot.Worklinks = mergeUniqueWorklinks(fleetOutcome.snapshot.Worklinks, exactLinks)
+		sessionLinksHydrated = hydrated
+	}
 	sessions, probed, missing := service.probeReferencedSessions(ctx, fleetOutcome.snapshot.Worklinks, batch.Sessions)
 	service.cacheSessions(sessions)
 	relationships := service.match(fleetOutcome.snapshot.Tasks, fleetOutcome.snapshot.Worklinks, sessions)
@@ -120,6 +130,7 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 		ReadTimestamp: fleetOutcome.snapshot.ReadTimestamp,
 		Coverage: Coverage{
 			FleetLimit: service.config.Fleet.Limit, FleetSnapshotReturned: fleetOutcome.snapshot.SnapshotTasks,
+			FleetWorklinksCapped: worklinksCapped, SessionLinksHydrated: sessionLinksHydrated,
 			ActiveTaskLimit: service.config.Fleet.ActiveLimit, ActiveTaskReturned: fleetOutcome.snapshot.ActiveTasks,
 			HistoryLimit: service.config.History.RecentLimit, HistoryPartial: batch.Partial,
 			HistoryProbed: probed, HistoryReturned: len(sessions),
@@ -130,6 +141,108 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 		Dependencies: fleetOutcome.snapshot.Dependencies, Worklinks: fleetOutcome.snapshot.Worklinks,
 		Sessions: sessions, Relationships: relationships, Findings: findings,
 	}, nil
+}
+
+func (service *Service) hydrateSessionWorklinks(ctx context.Context, sessions []SessionSummary) ([]Worklink, int, error) {
+	ids := make([]string, 0, len(sessions))
+	seenIDs := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		id := strings.TrimSpace(session.SessionID)
+		if id == "" || !service.sessionPattern.MatchString(id) {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := seenIDs[key]; exists {
+			continue
+		}
+		seenIDs[key] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, 0, nil
+	}
+	type outcome struct {
+		id    string
+		links []Worklink
+		err   error
+	}
+	jobs := make(chan string)
+	results := make(chan outcome, len(ids))
+	workers := service.config.Fleet.SessionLinkConcurrency
+	if workers > len(ids) {
+		workers = len(ids)
+	}
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for id := range jobs {
+				links, err := service.fleet.SessionWorklinks(ctx, id)
+				results <- outcome{id: id, links: links, err: err}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, id := range ids {
+			select {
+			case jobs <- id:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	group.Wait()
+	close(results)
+	links := make([]Worklink, 0)
+	errorsByID := make([]string, 0)
+	for result := range results {
+		if result.err != nil {
+			errorsByID = append(errorsByID, result.id+": "+result.err.Error())
+			continue
+		}
+		links = append(links, result.links...)
+	}
+	if len(errorsByID) > 0 {
+		sort.Strings(errorsByID)
+		return nil, len(ids), errors.New(strings.Join(errorsByID, "; "))
+	}
+	return links, len(ids), nil
+}
+
+func snapshotCollectionCapped(snapshot FleetSnapshot, name string) bool {
+	collection, ok := snapshot.Collections[name].(map[string]any)
+	if !ok {
+		return false
+	}
+	capped, _ := collection["capped"].(bool)
+	return capped
+}
+
+func mergeUniqueWorklinks(existing, additions []Worklink) []Worklink {
+	merged := append([]Worklink(nil), existing...)
+	seen := make(map[string]struct{}, len(existing)+len(additions))
+	for _, link := range existing {
+		seen[worklinkIdentity(link)] = struct{}{}
+	}
+	for _, link := range additions {
+		key := worklinkIdentity(link)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, link)
+	}
+	sortWorklinks(merged)
+	return merged
+}
+
+func worklinkIdentity(link Worklink) string {
+	if link.ArtifactID != "" {
+		return "id:" + link.ArtifactID
+	}
+	return strings.Join([]string{"fields", link.TaskID, link.ArtifactType, link.ArtifactRef, link.Thread}, "\x00")
 }
 
 func (service *Service) Search(ctx context.Context, search HistorySearch) (HistoryBatch, error) {

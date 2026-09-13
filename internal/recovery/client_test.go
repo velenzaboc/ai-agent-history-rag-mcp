@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,7 +20,7 @@ func TestMCPFleetClientParsesStreamableHTTPEvent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, SessionLinkLimit: 10, SessionLinkConcurrency: 2, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func TestMCPFleetClientOverlaysActiveTasksOutsideBoundedSnapshot(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", TasksTool: "tasks", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 1, ActiveLimit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, []string{"in_progress", "blocked"}, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", TasksTool: "tasks", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 1, ActiveLimit: 10, TaskPromptLimit: 10, SessionLinkLimit: 10, SessionLinkConcurrency: 2, MaxResponseBytes: 1 << 20}, []string{"in_progress", "blocked"}, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func TestMCPFleetClientLoadsExactTaskWorklinks(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, SessionLinkLimit: 10, SessionLinkConcurrency: 2, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +108,83 @@ func TestMCPFleetClientLoadsExactTaskWorklinks(t *testing.T) {
 	}
 	if len(links) != 1 || links[0].ArtifactID != "A-1" {
 		t.Fatalf("unexpected exact worklinks: %#v", links)
+	}
+}
+
+func TestMCPFleetClientLoadsExactSessionWorklinksFromSearch(t *testing.T) {
+	const sessionID = "00000000-0000-0000-0000-000000000001"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID     int64 `json:"id"`
+			Params struct {
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Params.Name != "search" || request.Params.Arguments["query"] != sessionID || request.Params.Arguments["limit"] != float64(10) {
+			t.Fatalf("unexpected session worklink request: %#v", request.Params)
+		}
+		if _, supplied := request.Params.Arguments["node_kind"]; supplied {
+			t.Fatalf("session worklink search must include artifact nodes: %#v", request.Params.Arguments)
+		}
+		result := map[string]any{"nodes": []any{
+			map[string]any{
+				"node_id": "A-1", "node_kind": "artifact", "project_id": "project-a",
+				"current_version": map[string]any{
+					"contract": map[string]any{"artifact_ref": sessionID, "artifact_type_kind": "dispatch", "project_id": "project-a"},
+					"payload":  map[string]any{"task_id": "T-1", "thread": sessionID, "note": "historical session", "project_id": "project-a", "fleet_created_at": "2026-09-11T10:00:00Z"},
+				},
+			},
+			map[string]any{
+				"node_id": "A-DECOY", "node_kind": "artifact", "project_id": "project-a",
+				"current_version": map[string]any{
+					"contract": map[string]any{"artifact_ref": "different", "artifact_type_kind": "finding", "project_id": "project-a"},
+					"payload":  map[string]any{"task_id": "T-2", "thread": "different", "note": sessionID, "project_id": "project-a"},
+				},
+			},
+			map[string]any{"node_id": "T-1", "node_kind": "task", "project_id": "project-a", "current_version": map[string]any{"payload": map[string]any{"task_id": "T-1"}}},
+		}}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"structuredContent": result}})
+	}))
+	defer server.Close()
+
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, SessionLinkLimit: 10, SessionLinkConcurrency: 2, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	links, err := client.SessionWorklinks(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].ArtifactID != "A-1" || links[0].TaskID != "T-1" || links[0].ArtifactType != "dispatch" || links[0].Thread != sessionID {
+		t.Fatalf("unexpected exact session worklinks: %#v", links)
+	}
+}
+
+func TestMCPFleetClientRefusesCappedSessionWorklinkSearch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		result := map[string]any{"nodes": []any{
+			map[string]any{"node_id": "A-1", "node_kind": "artifact", "project_id": "project-a"},
+		}}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"structuredContent": result}})
+	}))
+	defer server.Close()
+
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, SessionLinkLimit: 1, SessionLinkConcurrency: 1, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SessionWorklinks(context.Background(), "00000000-0000-0000-0000-000000000001"); err == nil || !strings.Contains(err.Error(), "exact coverage is unknown") {
+		t.Fatalf("capped exact search did not fail closed: %v", err)
 	}
 }
 
@@ -133,7 +211,7 @@ func TestMCPFleetClientSearchesConfiguredTaskTool(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, SessionLinkLimit: 10, SessionLinkConcurrency: 2, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +244,7 @@ func TestMCPFleetClientLoadsConfiguredScopedSnapshot(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
+	client, err := NewMCPFleetClient(FleetConfig{Mode: "mcp_http", Endpoint: server.URL, ProjectID: "project-a", SnapshotTool: "snapshot", WorklinksTool: "worklinks", SearchTool: "search", Scope: "project", Limit: 10, TaskPromptLimit: 10, SessionLinkLimit: 10, SessionLinkConcurrency: 2, MaxResponseBytes: 1 << 20}, nil, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

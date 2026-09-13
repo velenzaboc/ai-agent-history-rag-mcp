@@ -42,6 +42,60 @@ func TestBuildDashboardLinksExactSessionsAndClassifiesOldOrphans(t *testing.T) {
 	}
 }
 
+func TestBuildDashboardHydratesExactSessionLinksWhenSnapshotWorklinksAreCapped(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	const sessionID = "00000000-0000-0000-0000-000000000001"
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{
+		snapshot: FleetSnapshot{
+			ProjectID:   "project-a",
+			Collections: map[string]any{"worklinks": map[string]any{"capped": true, "returned": float64(1), "authorized_total": float64(2)}},
+			Tasks:       []Task{{TaskID: "T-1", Title: "Historical owner", Status: "complete", Level: "task", UpdatedAt: now.Add(-1000 * time.Hour)}},
+		},
+		sessionWorklinksBySession: map[string][]Worklink{
+			sessionID: {{ProjectID: "project-a", TaskID: "T-1", ArtifactID: "A-1", ArtifactType: "dispatch", ArtifactRef: sessionID, Thread: sessionID}},
+		},
+	}
+	history := stubHistory{recent: HistoryBatch{Sessions: []SessionSummary{{SessionID: sessionID, Summary: "historical work", Timestamp: now.Add(-1000 * time.Hour)}}}}
+	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := service.Dashboard(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.Relationships) != 1 || dashboard.Relationships[0].Kind != "exact" || dashboard.Relationships[0].TaskID != "T-1" {
+		t.Fatalf("targeted exact link was not matched: %#v", dashboard.Relationships)
+	}
+	if hasFinding(dashboard.Findings, "abandoned_session", "", sessionID) {
+		t.Fatalf("exactly linked session was classified as abandoned: %#v", dashboard.Findings)
+	}
+	if !dashboard.Coverage.FleetWorklinksCapped || dashboard.Coverage.SessionLinksHydrated != 1 || len(dashboard.Worklinks) != 1 {
+		t.Fatalf("targeted hydration coverage is incomplete: %#v", dashboard.Coverage)
+	}
+}
+
+func TestBuildDashboardFailsClosedWhenCappedSessionLinkHydrationFails(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{
+		snapshot: FleetSnapshot{
+			ProjectID:   "project-a",
+			Collections: map[string]any{"worklinks": map[string]any{"capped": true}},
+		},
+		sessionWorklinksErr: errors.New("search unavailable"),
+	}
+	history := stubHistory{recent: HistoryBatch{Sessions: []SessionSummary{{SessionID: "00000000-0000-0000-0000-000000000001", Timestamp: now.Add(-1000 * time.Hour)}}}}
+	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Dashboard(context.Background()); err == nil || !strings.Contains(err.Error(), "hydrate exact session worklinks") {
+		t.Fatalf("capped relationship lookup did not fail closed: %v", err)
+	}
+}
+
 func TestBuildDashboardDoesNotInferMissingWorklinkForOverlayOnlyTask(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	cfg := mustTestConfig(t)
@@ -229,12 +283,14 @@ func hasFinding(findings []Finding, kind, taskID, sessionID string) bool {
 }
 
 type stubFleet struct {
-	snapshot        FleetSnapshot
-	scoped          FleetSnapshot
-	worklinks       []Worklink
-	worklinksByTask map[string][]Worklink
-	search          []Task
-	err             error
+	snapshot                  FleetSnapshot
+	scoped                    FleetSnapshot
+	worklinks                 []Worklink
+	worklinksByTask           map[string][]Worklink
+	sessionWorklinksBySession map[string][]Worklink
+	sessionWorklinksErr       error
+	search                    []Task
+	err                       error
 }
 
 func (s stubFleet) Snapshot(context.Context) (FleetSnapshot, error) { return s.snapshot, s.err }
@@ -247,6 +303,12 @@ func (s stubFleet) Worklinks(_ context.Context, taskID string) ([]Worklink, erro
 		return s.worklinksByTask[taskID], s.err
 	}
 	return s.worklinks, s.err
+}
+func (s stubFleet) SessionWorklinks(_ context.Context, sessionID string) ([]Worklink, error) {
+	if s.sessionWorklinksErr != nil {
+		return nil, s.sessionWorklinksErr
+	}
+	return s.sessionWorklinksBySession[sessionID], nil
 }
 func (s stubFleet) Search(context.Context, string, int) ([]Task, error) { return s.search, s.err }
 

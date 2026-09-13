@@ -80,6 +80,15 @@ console therefore does not classify an overlay-only task as unlinked. This keeps
 the recovery inbox useful without turning a partial read into false absence
 evidence.
 
+When the snapshot reports that its work-link collection is capped, the console
+also searches the configured `search_tool` for each visible session ID and
+merges only exact `artifact_ref` or `thread` matches into the display projection.
+`fleet.session_link_limit` and `fleet.session_link_concurrency` bound that pass.
+Any lookup failure or result set that reaches the configured bound aborts the
+dashboard response instead of classifying a linked session as abandoned from
+incomplete evidence. The coverage strip reports both the capped state and the
+number of session IDs hydrated.
+
 Selecting a task calls the configured `worklinks_tool` for that exact task. The
 drawer and restart-prompt path therefore use current durable work links even
 when the task itself arrived only through the active overlay.
@@ -128,7 +137,7 @@ cannot retrieve the same session by exact ID.
 |---|---|
 | root | listener, base path, request timeout, shutdown timeout |
 | `access` | optional bearer protection for the console itself; `none` requires a loopback listener |
-| `fleet` | MCP URL, project and root scope, snapshot/active/exact-worklink/search tool names, coherent/active/task-prompt limits, response bound |
+| `fleet` | MCP URL, project and root scope, snapshot/active/exact-worklink/search tool names, coherent/active/task-prompt/session-link limits, session-link concurrency, response bound |
 | `history` | compatibility API URL and paths, auth environment name, search behavior, cache/probe/response bounds |
 | `matching` | session-ID grammar, cross-machine path normalization, evidence weights, acceptance thresholds |
 | `discovery` | query fields and stop words, task/history/hydration limits, concurrency, scoring weights, thresholds, and verdict labels/colors |
