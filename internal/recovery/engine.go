@@ -113,6 +113,11 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 	if err != nil {
 		return Dashboard{}, fmt.Errorf("read session review dispositions: %w", err)
 	}
+	linkedTasks, sessionTasksHydrated, err := service.hydrateSessionTasks(ctx, fleetOutcome.snapshot.Tasks, relationshipLinks, sessions)
+	if err != nil {
+		return Dashboard{}, fmt.Errorf("hydrate exact session tasks: %w", err)
+	}
+	fleetOutcome.snapshot.Tasks = append(fleetOutcome.snapshot.Tasks, linkedTasks...)
 	relationships := service.match(fleetOutcome.snapshot.Tasks, relationshipLinks, sessions)
 	visibleDispositions, err := visibleSessionDispositions(dispositions, sessions, relationships)
 	if err != nil {
@@ -138,7 +143,7 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 		ReadTimestamp: fleetOutcome.snapshot.ReadTimestamp,
 		Coverage: Coverage{
 			FleetLimit: service.config.Fleet.Limit, FleetSnapshotReturned: fleetOutcome.snapshot.SnapshotTasks,
-			FleetWorklinksCapped: worklinksCapped, SessionLinksHydrated: sessionLinksHydrated,
+			FleetWorklinksCapped: worklinksCapped, SessionLinksHydrated: sessionLinksHydrated, SessionTasksHydrated: sessionTasksHydrated,
 			ActiveTaskLimit: service.config.Fleet.ActiveLimit, ActiveTaskReturned: fleetOutcome.snapshot.ActiveTasks,
 			HistoryLimit: service.config.History.RecentLimit, HistoryPartial: batch.Partial,
 			HistoryProbed: probed, HistoryReturned: len(sessions),
@@ -281,6 +286,126 @@ func (service *Service) hydrateSessionWorklinks(ctx context.Context, sessions []
 		return nil, len(ids), errors.New(strings.Join(errorsByID, "; "))
 	}
 	return links, len(ids), nil
+}
+
+func (service *Service) hydrateSessionTasks(ctx context.Context, tasks []Task, links []Worklink, sessions []SessionSummary) ([]Task, int, error) {
+	sessionIDs := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		if session.SessionID != "" {
+			sessionIDs[strings.ToLower(session.SessionID)] = struct{}{}
+		}
+	}
+	present := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		present[task.TaskID] = struct{}{}
+	}
+	missing := make(map[string]struct{})
+	for _, link := range links {
+		if link.TaskID == "" {
+			continue
+		}
+		if _, exists := present[link.TaskID]; exists {
+			continue
+		}
+		matched := false
+		for _, candidate := range []string{link.SessionID, link.Thread, link.ArtifactRef} {
+			if _, exists := sessionIDs[strings.ToLower(strings.TrimSpace(candidate))]; exists {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			missing[link.TaskID] = struct{}{}
+		}
+	}
+	if len(missing) == 0 {
+		return nil, 0, nil
+	}
+	if len(missing) > service.config.Fleet.SessionLinkLimit {
+		return nil, 0, fmt.Errorf("%d session-linked tasks exceed the configured hydration bound of %d", len(missing), service.config.Fleet.SessionLinkLimit)
+	}
+	ids := make([]string, 0, len(missing))
+	for id := range missing {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	type outcome struct {
+		id   string
+		task Task
+		err  error
+	}
+	jobs := make(chan string)
+	results := make(chan outcome, len(ids))
+	workers := service.config.Fleet.SessionLinkConcurrency
+	if workers > len(ids) {
+		workers = len(ids)
+	}
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for id := range jobs {
+				candidates, err := service.fleet.Search(ctx, id, service.config.Fleet.SessionLinkLimit)
+				if err != nil {
+					results <- outcome{id: id, err: err}
+					continue
+				}
+				matches := 0
+				var exact Task
+				for index := range candidates {
+					if candidates[index].TaskID != id {
+						continue
+					}
+					matches++
+					exact = candidates[index]
+				}
+				if matches == 0 {
+					results <- outcome{id: id, err: errors.New("exact task identity was not returned")}
+					continue
+				}
+				if matches > 1 {
+					results <- outcome{id: id, err: errors.New("task search returned duplicate exact identities")}
+					continue
+				}
+				exact.Projection = "session_link_overlay"
+				results <- outcome{id: id, task: exact}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, id := range ids {
+			select {
+			case jobs <- id:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	group.Wait()
+	close(results)
+	hydrated := make([]Task, 0, len(ids))
+	errorsByID := make([]string, 0)
+	for result := range results {
+		if result.err != nil {
+			errorsByID = append(errorsByID, result.id+": "+result.err.Error())
+			continue
+		}
+		hydrated = append(hydrated, result.task)
+	}
+	if completed := len(hydrated) + len(errorsByID); completed != len(ids) {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		return nil, 0, fmt.Errorf("task hydration completed %d of %d exact identities", completed, len(ids))
+	}
+	if len(errorsByID) > 0 {
+		sort.Strings(errorsByID)
+		return nil, 0, errors.New(strings.Join(errorsByID, "; "))
+	}
+	sort.SliceStable(hydrated, func(i, j int) bool { return hydrated[i].TaskID < hydrated[j].TaskID })
+	return hydrated, len(hydrated), nil
 }
 
 func snapshotCollectionCapped(snapshot FleetSnapshot, name string) bool {

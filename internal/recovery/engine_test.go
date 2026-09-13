@@ -76,6 +76,63 @@ func TestBuildDashboardHydratesExactSessionLinksWhenSnapshotWorklinksAreCapped(t
 	}
 }
 
+func TestBuildDashboardHydratesSessionLinkedTaskMissingFromCappedSnapshot(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	const sessionID = "00000000-0000-0000-0000-000000000001"
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{
+		snapshot: FleetSnapshot{
+			ProjectID:   "project-a",
+			Collections: map[string]any{"tasks": map[string]any{"capped": true}, "worklinks": map[string]any{"capped": true}},
+		},
+		sessionWorklinksBySession: map[string][]Worklink{
+			sessionID: {{ProjectID: "project-a", TaskID: "T-OUTSIDE-SLICE", ArtifactID: "A-OUTSIDE", ArtifactType: "dispatch", ArtifactRef: sessionID, SessionID: sessionID, Thread: sessionID}},
+		},
+		search: []Task{{ProjectID: "project-a", TaskID: "T-OUTSIDE-SLICE", Title: "Historical task outside snapshot", Status: "not_started", Level: "task", UpdatedAt: now.Add(-1000 * time.Hour)}},
+	}
+	history := stubHistory{recent: HistoryBatch{Sessions: []SessionSummary{{SessionID: sessionID, Summary: "historical work", Timestamp: now.Add(-1000 * time.Hour)}}}}
+	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := service.Dashboard(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.Relationships) != 1 || dashboard.Relationships[0].Kind != "exact" || dashboard.Relationships[0].TaskID != "T-OUTSIDE-SLICE" {
+		t.Fatalf("task behind capped snapshot was not hydrated for exact matching: %#v", dashboard.Relationships)
+	}
+	if dashboard.Coverage.SessionTasksHydrated != 1 {
+		t.Fatalf("hydrated task coverage = %d, want 1", dashboard.Coverage.SessionTasksHydrated)
+	}
+	if hasFinding(dashboard.Findings, "abandoned_session", "", sessionID) || hasFinding(dashboard.Findings, "orphan_session", "", sessionID) {
+		t.Fatalf("exactly linked session remained unbound after task hydration: %#v", dashboard.Findings)
+	}
+}
+
+func TestBuildDashboardFailsClosedWhenSessionLinkedTaskCannotBeHydrated(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	const sessionID = "00000000-0000-0000-0000-000000000001"
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{
+		snapshot: FleetSnapshot{
+			ProjectID:   "project-a",
+			Collections: map[string]any{"tasks": map[string]any{"capped": true}, "worklinks": map[string]any{"capped": true}},
+		},
+		sessionWorklinksBySession: map[string][]Worklink{
+			sessionID: {{ProjectID: "project-a", TaskID: "T-MISSING", ArtifactID: "A-MISSING", ArtifactType: "dispatch", ArtifactRef: sessionID, SessionID: sessionID}},
+		},
+	}
+	history := stubHistory{recent: HistoryBatch{Sessions: []SessionSummary{{SessionID: sessionID, Timestamp: now.Add(-1000 * time.Hour)}}}}
+	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Dashboard(context.Background()); err == nil || !strings.Contains(err.Error(), "exact task identity was not returned") {
+		t.Fatalf("missing exact task identity did not fail closed: %v", err)
+	}
+}
+
 func TestBuildDashboardTreatsConfiguredSessionReviewAsDispositionNotRelationship(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	const sessionID = "00000000-0000-0000-0000-000000000002"
