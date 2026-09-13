@@ -61,9 +61,11 @@ func (client *MCPFleetClient) SessionWorklinks(ctx context.Context, sessionID st
 			NodeID         string `json:"node_id"`
 			NodeKind       string `json:"node_kind"`
 			ProjectID      string `json:"project_id"`
+			Status         string `json:"status"`
 			CurrentVersion struct {
 				Contract json.RawMessage `json:"contract"`
 				Payload  json.RawMessage `json:"payload"`
+				Status   string          `json:"status"`
 			} `json:"current_version"`
 		} `json:"nodes"`
 	}
@@ -81,6 +83,9 @@ func (client *MCPFleetClient) SessionWorklinks(ctx context.Context, sessionID st
 	seen := make(map[string]struct{}, len(result.Nodes))
 	for _, node := range result.Nodes {
 		if node.NodeKind != "artifact" {
+			continue
+		}
+		if strings.EqualFold(node.Status, "archived") || strings.EqualFold(node.CurrentVersion.Status, "archived") {
 			continue
 		}
 		if node.NodeID == "" || (node.ProjectID != "" && node.ProjectID != client.config.ProjectID) {

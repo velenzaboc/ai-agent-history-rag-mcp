@@ -145,6 +145,14 @@ func TestMCPFleetClientLoadsExactSessionWorklinksFromSearch(t *testing.T) {
 					"payload":  map[string]any{"task_id": "T-2", "thread": "different", "note": sessionID, "project_id": "project-a"},
 				},
 			},
+			map[string]any{
+				"node_id": "A-ARCHIVED", "node_kind": "artifact", "project_id": "project-a", "status": "archived",
+				"current_version": map[string]any{
+					"status":   "archived",
+					"contract": map[string]any{"artifact_ref": "commit-archived", "artifact_type_kind": "commit", "project_id": "project-a"},
+					"payload":  map[string]any{"task_id": "T-ARCHIVED", "session_id": sessionID, "project_id": "project-a"},
+				},
+			},
 			map[string]any{"node_id": "T-1", "node_kind": "task", "project_id": "project-a", "current_version": map[string]any{"payload": map[string]any{"task_id": "T-1"}}},
 		}}
 		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{"structuredContent": result}})
