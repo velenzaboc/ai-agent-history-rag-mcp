@@ -128,6 +128,18 @@ type Relationship struct {
 	Reasons   []string `json:"reasons"`
 }
 
+type SessionDisposition struct {
+	ArtifactID  string `json:"artifact_id"`
+	ArtifactRef string `json:"artifact_ref"`
+	TaskID      string `json:"task_id"`
+	SessionID   string `json:"session_id"`
+	Kind        string `json:"kind"`
+	Label       string `json:"label"`
+	Color       string `json:"color"`
+	Detail      string `json:"detail"`
+	CreatedAt   string `json:"created_at,omitempty"`
+}
+
 type Finding struct {
 	Kind      string    `json:"kind"`
 	Label     string    `json:"label"`
@@ -141,12 +153,13 @@ type Finding struct {
 }
 
 type DashboardCounts struct {
-	Tasks         int `json:"tasks"`
-	Sessions      int `json:"sessions"`
-	Relationships int `json:"relationships"`
-	Findings      int `json:"findings"`
-	HighSeverity  int `json:"high_severity"`
-	Milestones    int `json:"milestones"`
+	Tasks            int `json:"tasks"`
+	Sessions         int `json:"sessions"`
+	Relationships    int `json:"relationships"`
+	ReviewedSessions int `json:"reviewed_sessions"`
+	Findings         int `json:"findings"`
+	HighSeverity     int `json:"high_severity"`
+	Milestones       int `json:"milestones"`
 }
 
 type Dashboard struct {
@@ -166,6 +179,7 @@ type Dashboard struct {
 	Worklinks      []Worklink           `json:"worklinks"`
 	Sessions       []SessionSummary     `json:"sessions"`
 	Relationships  []Relationship       `json:"relationships"`
+	Dispositions   []SessionDisposition `json:"session_dispositions"`
 	Findings       []Finding            `json:"findings"`
 }
 

@@ -109,6 +109,15 @@
   "classification": {
     "stale_after_hours": 168,
     "abandoned_after_hours": 720,
+    "session_review": {
+      "artifact_type": "finding",
+      "artifact_ref_prefix": "recovery-disposition:",
+      "kinds": [
+        {"id": "superseded", "label": "Reviewed · superseded", "color": "#6DE1C0"},
+        {"id": "unresolved", "label": "Reviewed · identity unresolved", "color": "#F1B969"},
+        {"id": "out_of_scope", "label": "Reviewed · unrelated product", "color": "#91A0B5"}
+      ]
+    },
     "rules": [
       {
         "id": "orphan_session",

@@ -161,7 +161,20 @@ type PathRewrite struct {
 type ClassificationConfig struct {
 	StaleAfterHours     int                  `json:"stale_after_hours"`
 	AbandonedAfterHours int                  `json:"abandoned_after_hours"`
+	SessionReview       SessionReviewConfig  `json:"session_review"`
 	Rules               []ClassificationRule `json:"rules"`
+}
+
+type SessionReviewConfig struct {
+	ArtifactType      string                    `json:"artifact_type"`
+	ArtifactRefPrefix string                    `json:"artifact_ref_prefix"`
+	Kinds             []SessionReviewKindConfig `json:"kinds"`
+}
+
+type SessionReviewKindConfig struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Color string `json:"color"`
 }
 
 type ClassificationRule struct {
@@ -527,6 +540,25 @@ func (cfg DiscoveryConfig) validate() error {
 func (cfg ClassificationConfig) validate() error {
 	if cfg.StaleAfterHours < 1 || cfg.AbandonedAfterHours < cfg.StaleAfterHours {
 		return errors.New("abandoned_after_hours must be at least stale_after_hours")
+	}
+	if !identifierPattern.MatchString(cfg.SessionReview.ArtifactType) {
+		return errors.New("session_review artifact_type is invalid")
+	}
+	if cfg.SessionReview.ArtifactRefPrefix != strings.TrimSpace(cfg.SessionReview.ArtifactRefPrefix) || cfg.SessionReview.ArtifactRefPrefix == "" || len(cfg.SessionReview.ArtifactRefPrefix) > 256 || strings.ContainsAny(cfg.SessionReview.ArtifactRefPrefix, "\r\n") {
+		return errors.New("session_review artifact_ref_prefix is invalid")
+	}
+	seenReviewKinds := make(map[string]struct{}, len(cfg.SessionReview.Kinds))
+	for _, kind := range cfg.SessionReview.Kinds {
+		if !identifierPattern.MatchString(kind.ID) || strings.TrimSpace(kind.Label) == "" || !colorPattern.MatchString(kind.Color) {
+			return errors.New("session_review kind contains an invalid id, label, or color")
+		}
+		if _, exists := seenReviewKinds[kind.ID]; exists {
+			return errors.New("session_review kind ids must be unique")
+		}
+		seenReviewKinds[kind.ID] = struct{}{}
+	}
+	if len(seenReviewKinds) == 0 {
+		return errors.New("session_review requires at least one kind")
 	}
 	seen := make(map[string]struct{})
 	for _, rule := range cfg.Rules {
