@@ -53,7 +53,7 @@ func TestBuildDashboardHydratesExactSessionLinksWhenSnapshotWorklinksAreCapped(t
 			Tasks:       []Task{{TaskID: "T-1", Title: "Historical owner", Status: "complete", Level: "task", UpdatedAt: now.Add(-1000 * time.Hour)}},
 		},
 		sessionWorklinksBySession: map[string][]Worklink{
-			sessionID: {{ProjectID: "project-a", TaskID: "T-1", ArtifactID: "A-1", ArtifactType: "dispatch", ArtifactRef: sessionID, Thread: sessionID}},
+			sessionID: {{ProjectID: "project-a", TaskID: "T-1", ArtifactID: "A-1", ArtifactType: "commit", ArtifactRef: "commit-1", SessionID: sessionID, Thread: "GRAPHTRUTH"}},
 		},
 	}
 	history := stubHistory{recent: HistoryBatch{Sessions: []SessionSummary{{SessionID: sessionID, Summary: "historical work", Timestamp: now.Add(-1000 * time.Hour)}}}}

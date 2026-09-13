@@ -71,6 +71,7 @@ type Worklink struct {
 	CreatedAt    string `json:"created_at,omitempty"`
 	Note         string `json:"note"`
 	ProjectID    string `json:"project_id"`
+	SessionID    string `json:"session_id,omitempty"`
 	TaskID       string `json:"task_id"`
 	Thread       string `json:"thread"`
 }

@@ -96,7 +96,8 @@ evidence.
 
 When the snapshot reports that its work-link collection is capped, the console
 also searches the configured `search_tool` for each visible session ID and
-merges only exact `artifact_ref` or `thread` matches into the display projection.
+merges only exact native `session_id`, `artifact_ref`, or `thread` matches into
+the display projection.
 `fleet.session_link_limit` and `fleet.session_link_concurrency` bound that pass.
 Any lookup failure or result set that reaches the configured bound aborts the
 dashboard response instead of classifying a linked session as abandoned from

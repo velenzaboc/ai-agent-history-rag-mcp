@@ -134,8 +134,8 @@ func TestMCPFleetClientLoadsExactSessionWorklinksFromSearch(t *testing.T) {
 			map[string]any{
 				"node_id": "A-1", "node_kind": "artifact", "project_id": "project-a",
 				"current_version": map[string]any{
-					"contract": map[string]any{"artifact_ref": sessionID, "artifact_type_kind": "dispatch", "project_id": "project-a"},
-					"payload":  map[string]any{"task_id": "T-1", "thread": sessionID, "note": "historical session", "project_id": "project-a", "fleet_created_at": "2026-09-11T10:00:00Z"},
+					"contract": map[string]any{"artifact_ref": "commit-1", "artifact_type_kind": "commit", "project_id": "project-a"},
+					"payload":  map[string]any{"task_id": "T-1", "thread": "GRAPHTRUTH", "session_id": sessionID, "note": "historical session", "project_id": "project-a", "fleet_created_at": "2026-09-11T10:00:00Z"},
 				},
 			},
 			map[string]any{
@@ -159,7 +159,7 @@ func TestMCPFleetClientLoadsExactSessionWorklinksFromSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(links) != 1 || links[0].ArtifactID != "A-1" || links[0].TaskID != "T-1" || links[0].ArtifactType != "dispatch" || links[0].Thread != sessionID {
+	if len(links) != 1 || links[0].ArtifactID != "A-1" || links[0].TaskID != "T-1" || links[0].ArtifactType != "commit" || links[0].Thread != "GRAPHTRUTH" || links[0].SessionID != sessionID {
 		t.Fatalf("unexpected exact session worklinks: %#v", links)
 	}
 }

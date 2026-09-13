@@ -1192,7 +1192,7 @@ func (service *Service) score(task Task, links []Worklink, session SessionSummar
 	exactPath := false
 	projectName := false
 	for _, link := range links {
-		if session.SessionID != "" && (strings.EqualFold(link.Thread, session.SessionID) || strings.EqualFold(link.ArtifactRef, session.SessionID)) {
+		if session.SessionID != "" && (strings.EqualFold(link.SessionID, session.SessionID) || strings.EqualFold(link.Thread, session.SessionID) || strings.EqualFold(link.ArtifactRef, session.SessionID)) {
 			exactSession = true
 		}
 		ref := service.normalizedPath(link.ArtifactRef)

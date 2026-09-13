@@ -94,6 +94,7 @@ func (client *MCPFleetClient) SessionWorklinks(ctx context.Context, sessionID st
 		var payload struct {
 			TaskID         string `json:"task_id"`
 			Thread         string `json:"thread"`
+			SessionID      string `json:"session_id"`
 			Note           string `json:"note"`
 			ProjectID      string `json:"project_id"`
 			FleetCreatedAt string `json:"fleet_created_at"`
@@ -104,7 +105,7 @@ func (client *MCPFleetClient) SessionWorklinks(ctx context.Context, sessionID st
 		if err := json.Unmarshal(node.CurrentVersion.Payload, &payload); err != nil {
 			return nil, fmt.Errorf("decode session worklink payload %s: %w", node.NodeID, err)
 		}
-		if !strings.EqualFold(contract.ArtifactRef, sessionID) && !strings.EqualFold(payload.Thread, sessionID) {
+		if !strings.EqualFold(contract.ArtifactRef, sessionID) && !strings.EqualFold(payload.Thread, sessionID) && !strings.EqualFold(payload.SessionID, sessionID) {
 			continue
 		}
 		projectID := node.ProjectID
@@ -123,7 +124,7 @@ func (client *MCPFleetClient) SessionWorklinks(ctx context.Context, sessionID st
 		seen[node.NodeID] = struct{}{}
 		links = append(links, Worklink{
 			ArtifactID: node.NodeID, ArtifactRef: contract.ArtifactRef, ArtifactType: contract.ArtifactTypeKind,
-			CreatedAt: payload.FleetCreatedAt, Note: payload.Note, ProjectID: projectID, TaskID: payload.TaskID, Thread: payload.Thread,
+			CreatedAt: payload.FleetCreatedAt, Note: payload.Note, ProjectID: projectID, SessionID: payload.SessionID, TaskID: payload.TaskID, Thread: payload.Thread,
 		})
 	}
 	sortWorklinks(links)

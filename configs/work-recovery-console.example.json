@@ -21,7 +21,7 @@
     "limit": 1000,
     "active_limit": 2000,
     "task_prompt_limit": 500,
-    "session_link_limit": 10,
+    "session_link_limit": 100,
     "session_link_concurrency": 4,
     "max_response_bytes": 134217728
   },
