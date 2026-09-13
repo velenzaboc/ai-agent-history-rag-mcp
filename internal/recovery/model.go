@@ -189,6 +189,7 @@ type Coverage struct {
 	FleetSnapshotReturned int  `json:"fleet_snapshot_returned"`
 	FleetWorklinksCapped  bool `json:"fleet_worklinks_capped"`
 	SessionLinksHydrated  int  `json:"session_links_hydrated"`
+	SessionTasksHydrated  int  `json:"session_tasks_hydrated"`
 	ActiveTaskLimit       int  `json:"active_task_limit"`
 	ActiveTaskReturned    int  `json:"active_task_returned"`
 	HistoryLimit          int  `json:"history_limit"`
