@@ -380,10 +380,20 @@ operator_files=(
   "$ROOT_DIR/scripts/install-windows.ps1"
   "$ROOT_DIR/scripts/uninstall-windows.ps1"
 )
-if rg -n -i --glob='*.sh' --glob='*.ps1' --glob='*.md' --glob='*.yml' --glob='*.yaml' \
-  '(^|[^[:alnum:]_])(python|uv|pip|pytest|ruff)([^[:alnum:]_]|$)' "${operator_files[@]}" >/dev/null; then
-  fail "documented or scripted legacy runtime route remains"
-fi
+for operator_path in "${operator_files[@]}"; do
+  [[ -e "$operator_path" ]] || fail "operator source is missing: $operator_path"
+done
+
+operator_file_count=0
+while IFS= read -r -d '' operator_file; do
+  operator_file_count=$((operator_file_count + 1))
+  if grep -Eqi -- '(^|[^[:alnum:]_])(python|uv|pip|pytest|ruff)([^[:alnum:]_]|$)' "$operator_file"; then
+    fail "documented or scripted legacy runtime route remains: $operator_file"
+  fi
+done < <(find "${operator_files[@]}" -type f \( \
+  -name '*.sh' -o -name '*.ps1' -o -name '*.md' -o -name '*.yml' -o -name '*.yaml' \
+\) -print0)
+(( operator_file_count > 0 )) || fail "operator runtime scan selected no files"
 grep -Eq 'history-rag-mcp-native.sh' "$ROOT_DIR/scripts/start.sh" || fail "start helper does not select native MCP"
 pass "legacy runtime sources, manifests, and launch routes are retired"
 
