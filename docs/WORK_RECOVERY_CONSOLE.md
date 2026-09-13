@@ -97,12 +97,16 @@ evidence.
 When the snapshot reports that its work-link collection is capped, the console
 also searches the configured `search_tool` for each visible session ID and
 merges only exact native `session_id`, `artifact_ref`, or `thread` matches into
-the display projection.
+the display projection. When an exact session work link targets a task outside
+the bounded task snapshot and active overlay, the console uses that same search
+surface to hydrate only the unique exact task identity. A missing or duplicate
+exact identity fails the dashboard response closed instead of turning the
+relationship into an orphan classification.
 `fleet.session_link_limit` and `fleet.session_link_concurrency` bound that pass.
 Any lookup failure or result set that reaches the configured bound aborts the
 dashboard response instead of classifying a linked session as abandoned from
 incomplete evidence. The coverage strip reports both the capped state and the
-number of session IDs hydrated.
+number of session IDs and exact task identities hydrated.
 
 Selecting a task calls the configured `worklinks_tool` for that exact task. The
 drawer and restart-prompt path therefore use current durable work links even
