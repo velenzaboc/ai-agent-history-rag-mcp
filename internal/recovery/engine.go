@@ -109,8 +109,16 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 	}
 	sessions, probed, missing := service.probeReferencedSessions(ctx, fleetOutcome.snapshot.Worklinks, batch.Sessions)
 	service.cacheSessions(sessions)
-	relationships := service.match(fleetOutcome.snapshot.Tasks, fleetOutcome.snapshot.Worklinks, sessions)
-	findings := service.classify(now, fleetOutcome.snapshot, sessions, relationships, missing)
+	relationshipLinks, dispositions, err := service.splitSessionDispositionLinks(fleetOutcome.snapshot.Worklinks)
+	if err != nil {
+		return Dashboard{}, fmt.Errorf("read session review dispositions: %w", err)
+	}
+	relationships := service.match(fleetOutcome.snapshot.Tasks, relationshipLinks, sessions)
+	visibleDispositions, err := visibleSessionDispositions(dispositions, sessions, relationships)
+	if err != nil {
+		return Dashboard{}, fmt.Errorf("resolve visible session review dispositions: %w", err)
+	}
+	findings := service.classify(now, fleetOutcome.snapshot, sessions, relationships, visibleDispositions, missing)
 	milestones := 0
 	for _, task := range fleetOutcome.snapshot.Tasks {
 		if containsFold(service.config.Status.MilestoneLevels, task.Level) {
@@ -136,11 +144,75 @@ func (service *Service) Dashboard(ctx context.Context) (Dashboard, error) {
 			HistoryProbed: probed, HistoryReturned: len(sessions),
 		},
 		View: service.config.View, Status: service.config.Status, Classification: service.config.Classification, Programs: service.config.Programs,
-		Counts:  DashboardCounts{Tasks: len(fleetOutcome.snapshot.Tasks), Sessions: len(sessions), Relationships: len(relationships), Findings: len(findings), HighSeverity: high, Milestones: milestones},
+		Counts:  DashboardCounts{Tasks: len(fleetOutcome.snapshot.Tasks), Sessions: len(sessions), Relationships: len(relationships), ReviewedSessions: len(visibleDispositions), Findings: len(findings), HighSeverity: high, Milestones: milestones},
 		Sources: []SourceStatus{fleetStatus, historyStatus}, Tasks: fleetOutcome.snapshot.Tasks,
 		Dependencies: fleetOutcome.snapshot.Dependencies, Worklinks: fleetOutcome.snapshot.Worklinks,
-		Sessions: sessions, Relationships: relationships, Findings: findings,
+		Sessions: sessions, Relationships: relationships, Dispositions: visibleDispositions, Findings: findings,
 	}, nil
+}
+
+func (service *Service) splitSessionDispositionLinks(links []Worklink) ([]Worklink, []SessionDisposition, error) {
+	kinds := make(map[string]SessionReviewKindConfig, len(service.config.Classification.SessionReview.Kinds))
+	for _, kind := range service.config.Classification.SessionReview.Kinds {
+		kinds[kind.ID] = kind
+	}
+	ordinary := make([]Worklink, 0, len(links))
+	dispositions := make([]SessionDisposition, 0)
+	seenSessions := make(map[string]string)
+	for _, link := range links {
+		if link.ArtifactType != service.config.Classification.SessionReview.ArtifactType || !strings.HasPrefix(link.ArtifactRef, service.config.Classification.SessionReview.ArtifactRefPrefix) {
+			ordinary = append(ordinary, link)
+			continue
+		}
+		suffix := strings.TrimPrefix(link.ArtifactRef, service.config.Classification.SessionReview.ArtifactRefPrefix)
+		kindID, sessionID, ok := strings.Cut(suffix, ":")
+		kind, registered := kinds[kindID]
+		if !ok || !registered || !service.sessionPattern.MatchString(sessionID) || !strings.EqualFold(link.Thread, sessionID) {
+			return nil, nil, fmt.Errorf("worklink %s is not a valid configured session review disposition", worklinkIdentity(link))
+		}
+		key := strings.ToLower(sessionID)
+		if prior, exists := seenSessions[key]; exists {
+			return nil, nil, fmt.Errorf("session %s has multiple active review dispositions (%s and %s)", sessionID, prior, worklinkIdentity(link))
+		}
+		seenSessions[key] = worklinkIdentity(link)
+		dispositions = append(dispositions, SessionDisposition{
+			ArtifactID: link.ArtifactID, ArtifactRef: link.ArtifactRef, TaskID: link.TaskID,
+			SessionID: sessionID, Kind: kind.ID, Label: kind.Label, Color: kind.Color,
+			Detail: link.Note, CreatedAt: link.CreatedAt,
+		})
+	}
+	sort.SliceStable(dispositions, func(i, j int) bool {
+		if dispositions[i].CreatedAt != dispositions[j].CreatedAt {
+			return dispositions[i].CreatedAt < dispositions[j].CreatedAt
+		}
+		return dispositions[i].SessionID < dispositions[j].SessionID
+	})
+	return ordinary, dispositions, nil
+}
+
+func visibleSessionDispositions(dispositions []SessionDisposition, sessions []SessionSummary, relationships []Relationship) ([]SessionDisposition, error) {
+	visible := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		visible[strings.ToLower(session.SessionID)] = struct{}{}
+	}
+	linked := make(map[string]struct{}, len(relationships))
+	for _, relationship := range relationships {
+		if relationship.Kind != "suggested" {
+			linked[strings.ToLower(relationship.SessionID)] = struct{}{}
+		}
+	}
+	result := make([]SessionDisposition, 0, len(dispositions))
+	for _, disposition := range dispositions {
+		key := strings.ToLower(disposition.SessionID)
+		if _, ok := visible[key]; !ok {
+			continue
+		}
+		if _, conflict := linked[key]; conflict {
+			return nil, fmt.Errorf("session %s has both an accepted task relationship and a review disposition", disposition.SessionID)
+		}
+		result = append(result, disposition)
+	}
+	return result, nil
 }
 
 func (service *Service) hydrateSessionWorklinks(ctx context.Context, sessions []SessionSummary) ([]Worklink, int, error) {
@@ -1163,7 +1235,7 @@ func (service *Service) normalizedPath(value string) string {
 	return strings.ToLower(strings.TrimRight(normalized, "/"))
 }
 
-func (service *Service) classify(now time.Time, snapshot FleetSnapshot, sessions []SessionSummary, relationships []Relationship, missing map[string]bool) []Finding {
+func (service *Service) classify(now time.Time, snapshot FleetSnapshot, sessions []SessionSummary, relationships []Relationship, dispositions []SessionDisposition, missing map[string]bool) []Finding {
 	rules := make(map[string]ClassificationRule)
 	for _, rule := range service.config.Classification.Rules {
 		rules[rule.ID] = rule
@@ -1181,11 +1253,16 @@ func (service *Service) classify(now time.Time, snapshot FleetSnapshot, sessions
 		acceptedBySession[relationship.SessionID] = append(acceptedBySession[relationship.SessionID], relationship)
 		acceptedByTask[relationship.TaskID] = append(acceptedByTask[relationship.TaskID], relationship)
 	}
+	reviewedBySession := make(map[string]struct{}, len(dispositions))
+	for _, disposition := range dispositions {
+		reviewedBySession[strings.ToLower(disposition.SessionID)] = struct{}{}
+	}
 	findings := make([]Finding, 0)
 	for _, session := range sessions {
 		age := ageHours(now, session.Timestamp)
 		accepted := acceptedBySession[session.SessionID]
-		if len(accepted) == 0 {
+		_, reviewed := reviewedBySession[strings.ToLower(session.SessionID)]
+		if len(accepted) == 0 && !reviewed {
 			kind := "orphan_session"
 			detail := "No accepted task relationship was derived from configured exact or strong evidence."
 			if age >= service.config.Classification.AbandonedAfterHours {

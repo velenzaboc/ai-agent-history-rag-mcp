@@ -76,6 +76,56 @@ func TestBuildDashboardHydratesExactSessionLinksWhenSnapshotWorklinksAreCapped(t
 	}
 }
 
+func TestBuildDashboardTreatsConfiguredSessionReviewAsDispositionNotRelationship(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	const sessionID = "00000000-0000-0000-0000-000000000002"
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{snapshot: FleetSnapshot{
+		ProjectID: "project-a",
+		Tasks:     []Task{{TaskID: "RECOVERY", Title: "Reconcile history", Status: "in_progress", Level: "task", UpdatedAt: now}},
+		Worklinks: []Worklink{{
+			ArtifactID: "REVIEW-1", TaskID: "RECOVERY", ArtifactType: "finding",
+			ArtifactRef: "recovery-disposition:superseded:" + sessionID, Thread: sessionID,
+			Note: "Reviewed against transcript and current task state.", CreatedAt: "2026-09-11T11:00:00Z",
+		}},
+	}}
+	history := stubHistory{recent: HistoryBatch{Sessions: []SessionSummary{{SessionID: sessionID, Summary: "old work", Timestamp: now.Add(-1000 * time.Hour)}}}}
+	service, err := NewService(cfg, fleet, history, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := service.Dashboard(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.Relationships) != 0 {
+		t.Fatalf("review disposition became a task relationship: %#v", dashboard.Relationships)
+	}
+	if len(dashboard.Dispositions) != 1 || dashboard.Dispositions[0].Kind != "superseded" || dashboard.Counts.ReviewedSessions != 1 {
+		t.Fatalf("review disposition was not surfaced: %#v %#v", dashboard.Dispositions, dashboard.Counts)
+	}
+	if hasFinding(dashboard.Findings, "abandoned_session", "", sessionID) || hasFinding(dashboard.Findings, "orphan_session", "", sessionID) {
+		t.Fatalf("reviewed session stayed in the recovery inbox: %#v", dashboard.Findings)
+	}
+}
+
+func TestBuildDashboardFailsClosedOnMalformedSessionReview(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	cfg := mustTestConfig(t)
+	fleet := stubFleet{snapshot: FleetSnapshot{ProjectID: "project-a", Worklinks: []Worklink{{
+		ArtifactID: "REVIEW-1", TaskID: "RECOVERY", ArtifactType: "finding",
+		ArtifactRef: "recovery-disposition:unknown:00000000-0000-0000-0000-000000000002",
+		Thread:      "00000000-0000-0000-0000-000000000002",
+	}}}}
+	service, err := NewService(cfg, fleet, stubHistory{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Dashboard(context.Background()); err == nil || !strings.Contains(err.Error(), "session review disposition") {
+		t.Fatalf("malformed review disposition did not fail closed: %v", err)
+	}
+}
+
 func TestBuildDashboardFailsClosedWhenCappedSessionLinkHydrationFails(t *testing.T) {
 	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
 	cfg := mustTestConfig(t)

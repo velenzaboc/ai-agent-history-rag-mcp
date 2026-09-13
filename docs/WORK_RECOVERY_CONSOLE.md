@@ -17,6 +17,9 @@ a second work-state database.
 - A recovery inbox, sorted by configured severity and age, for abandoned or
   unlinked history, stale active threads, missing history references, ambiguous
   bindings, and active tasks without a durable work link.
+- Durable reviewed-history dispositions. A reviewed session is removed from the
+  active recovery inbox without being misrepresented as a task relationship;
+  its disposition and evidence remain visible in the session drawer.
 - A KANBAN screen whose columns, order, colors, and active/terminal meaning come
   entirely from configuration.
 - Configured program pages backed by complete `execution_subtree` reads. Each
@@ -43,6 +46,17 @@ a second work-state database.
 
 The console never writes either source. A relationship is a scored display
 projection, not a task-graph mutation or new authority.
+
+Recovery reviews are ordinary durable task-graph work evidence created outside
+the read-only console. Their shape is configuration-driven. A work link matches
+`classification.session_review` only when its artifact type matches and its
+artifact reference is `<artifact_ref_prefix><kind-id>:<session-id>`, with the
+same exact session ID in `thread`. The link advances the task that performed the
+review; it does not claim the historical session performed that task. The
+console excludes these links from relationship scoring, requires one active
+disposition at most per session, and fails closed on malformed, unknown, or
+relationship-conflicting dispositions. Archive the disposition before adding a
+later accepted task relationship.
 
 ## Build and run
 
@@ -141,7 +155,7 @@ cannot retrieve the same session by exact ID.
 | `history` | compatibility API URL and paths, auth environment name, search behavior, cache/probe/response bounds |
 | `matching` | session-ID grammar, cross-machine path normalization, evidence weights, acceptance thresholds |
 | `discovery` | query fields and stop words, task/history/hydration limits, concurrency, scoring weights, thresholds, and verdict labels/colors |
-| `classification` | stale/abandoned ages plus finding labels, severities, and colors |
+| `classification` | stale/abandoned ages, finding labels/severities/colors, and the graph-backed session-review artifact grammar and disposition registry |
 | `programs` | zero or more live subtree pages: navigation text, root and lane identity, expected lane count, stage prefixes, source-thread coordinates, and subtree limit |
 | `status` | lane taxonomy, active and terminal groups, milestone level names |
 | `view` | title, wording, refresh/cache timing, display bounds, labels, and theme |
