@@ -30,6 +30,8 @@ type Readiness interface {
 type Config struct {
 	AuthEnabled bool
 	Authority   historyauth.Authority
+	Retrieval   Retrieval
+	ReadOnly    bool
 }
 
 type readinessDependency struct {
@@ -47,6 +49,9 @@ type Server struct {
 func New(config Config, verifier Verifier, dependencies []Readiness) (*Server, error) {
 	if config.AuthEnabled && verifier == nil {
 		return nil, errors.New("authenticated API requires verifier")
+	}
+	if config.ReadOnly && (!config.AuthEnabled || config.Retrieval == nil) {
+		return nil, errors.New("read-only API requires authenticated retrieval")
 	}
 	seen := make(map[string]struct{})
 	ownedDependencies := make([]readinessDependency, 0, len(dependencies))
@@ -90,7 +95,7 @@ func (s *Server) HTTPServer(address string) *http.Server {
 		Handler:           s.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      65 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    MaxHeaderBytes,
 	}
@@ -102,6 +107,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /health", s.withAuth(s.handleReadiness))
 	mux.HandleFunc("GET /status", s.withAuth(s.handleReadiness))
 	mux.HandleFunc("POST /api/positions", s.withAuth(s.handleCursorMutation))
+	mux.HandleFunc("POST /api/search", s.withAuth(s.handleSearch))
+	mux.HandleFunc("POST /api/search/files", s.withAuth(s.handleFileSearch))
+	mux.HandleFunc("POST /api/sessions", s.withAuth(s.handleSessions))
 	if s.config.Authority != nil {
 		mux.HandleFunc("GET /api/auth/state", s.withAuth(s.handleAuthState))
 		mux.HandleFunc("POST /api/auth/rotate", s.withAuth(s.handleAuthRotate))
@@ -207,8 +215,13 @@ func (s *Server) handleReadiness(response http.ResponseWriter, request *http.Req
 	}
 	results := make([]result, 0, len(s.dependencies))
 	ready := len(s.dependencies) == requiredReadinessDependencyCount
+	if s.config.ReadOnly {
+		ready = len(s.dependencies) == 1 && s.dependencies[0].name == "store"
+	}
 	for _, dependency := range s.dependencies {
-		dependencyReady := dependency.readiness.Ready(request.Context()) == nil
+		ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+		dependencyReady := dependency.readiness.Ready(ctx) == nil
+		cancel()
 		ready = ready && dependencyReady
 		results = append(results, result{Name: dependency.name, Ready: dependencyReady})
 	}

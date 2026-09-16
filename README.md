@@ -104,7 +104,7 @@ volumes when operating beyond a smoke test.
 
 ## Host service installation
 
-Host services bind only `127.0.0.1:4680`; do not open that listener to the
+Host ingestion services bind only `127.0.0.1:4680`; do not open that listener to the
 network. Build the binary first, export the production contract, then install.
 
 ### macOS
@@ -137,6 +137,14 @@ validation requires a Windows host; the repository cross-build verifies only
 that the native executable can be produced.
 
 ## Liveness and readiness
+
+For search against an existing corpus, the explicit read-only host mode binds
+`127.0.0.1:4681` and never starts a watcher. Set `CLAUDE_HISTORY_RAG_READ_ONLY=true`
+and `CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT=4681` in both daemon and MCP environments.
+The `device_service_account` credential profile uses the existing device source
+nested in private well-known ADC, bound to its exact source email, without
+changing the carrier or impersonating its target. See [launchd setup](docs/LAUNCHD_NATIVE.md).
+Read-only readiness reports storage only, with no ingestion claim.
 
 `GET /live` is intentionally unauthenticated and answers only whether the
 process listener is alive:

@@ -168,6 +168,15 @@ write_adc "$device/adc.json" service_account false '[]' "$identity"
 fixture_env "$device" "$device/adc.json" impersonated_service_account
 assert_success "valid device-sourced ADC" run_fixture --validate-only
 
+mkdir -p "$device/home/.config/gcloud"
+cp "$device/adc.json" "$device/home/.config/gcloud/application_default_credentials.json"
+restrict_file_acl "$device/home/.config/gcloud/application_default_credentials.json"
+fixture_env "$device" "" device_service_account
+FIXTURE_ENV+=("CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY=device-source@sample-project.iam.gserviceaccount.com" "CLAUDE_HISTORY_RAG_READ_ONLY=true" "CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT=4681")
+assert_success "read-only proxy uses existing device source" run_fixture --validate-only
+FIXTURE_ENV+=("CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY=$identity")
+assert_failure "device profile rejects impersonation target as source identity" run_fixture --validate-only
+
 production_shape_mutations=(
   'CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT|development'
   'CLAUDE_HISTORY_RAG_STORAGE_BACKEND|unsupported-store'

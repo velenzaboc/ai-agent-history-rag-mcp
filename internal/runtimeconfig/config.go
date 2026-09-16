@@ -46,6 +46,7 @@ type Config struct {
 	EmbeddingDimension      int
 	StatusServerHost        string
 	StatusServerPort        int
+	ReadOnly                bool
 	GoogleCredentials       gcpauth.Selector
 }
 
@@ -78,11 +79,15 @@ func LoadProduction(getenv func(string) string) (Config, error) {
 		EmbeddingDimension:      embeddingDimension,
 		StatusServerHost:        strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST")),
 		StatusServerPort:        statusPort,
+		ReadOnly:                getenv("CLAUDE_HISTORY_RAG_READ_ONLY") == "true",
 		GoogleCredentials: gcpauth.Selector{
 			CredentialsSource:   strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE")),
 			CredentialsProfile:  strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE")),
 			CredentialsIdentity: strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY")),
 		},
+	}
+	if raw := getenv("CLAUDE_HISTORY_RAG_READ_ONLY"); raw != "" && raw != "true" && raw != "false" {
+		return Config{}, fmt.Errorf("history_rag_runtime: read_only must be true or false")
 	}
 	if err := config.validate(); err != nil {
 		return Config{}, err
@@ -123,8 +128,12 @@ func (c Config) validate() error {
 	if c.EmbeddingDimension != ProductionEmbeddingDimension {
 		return fmt.Errorf("history_rag_runtime: embedding_dimension=%d expected %d", c.EmbeddingDimension, ProductionEmbeddingDimension)
 	}
-	if c.StatusServerPort != ProductionStatusServerPort {
-		return fmt.Errorf("history_rag_runtime: status_server_port=%d expected %d", c.StatusServerPort, ProductionStatusServerPort)
+	wantPort := ProductionStatusServerPort
+	if c.ReadOnly {
+		wantPort = 4681
+	}
+	if c.StatusServerPort != wantPort {
+		return fmt.Errorf("history_rag_runtime: status_server_port=%d expected %d", c.StatusServerPort, wantPort)
 	}
 	if err := c.GoogleCredentials.Validate("history_rag_google_credentials"); err != nil {
 		return err

@@ -24,10 +24,14 @@ require_exact() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 LABEL="com.ai-agent-history-rag.daemon"
+READ_ONLY="${CLAUDE_HISTORY_RAG_READ_ONLY:-false}"
+case "$READ_ONLY" in true) LABEL="com.ai-agent-history-rag.search" ;; false) ;; *) fail "read-only must be true or false" ;; esac
 LAUNCHCTL_BIN="${LAUNCHCTL_BIN:-launchctl}"
 STATE_DIR="${CLAUDE_HISTORY_RAG_STATE_DIR:-$HOME/.claude-history-rag}"
+if [[ "$READ_ONLY" == true ]]; then STATE_DIR="${CLAUDE_HISTORY_RAG_STATE_DIR:-$HOME/.claude-history-rag-native-search}"; fi
 CONFIG_DIR="$HOME/.config/ai-agent-history-rag"
 CONFIG_PATH="$CONFIG_DIR/history-ragd.json"
+if [[ "$READ_ONLY" == true ]]; then CONFIG_PATH="$CONFIG_DIR/history-ragd-search.json"; fi
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_DEST="$PLIST_DIR/$LABEL.plist"
 HISTORY_RAGD_BIN="${HISTORY_RAGD_BIN:-$PROJECT_DIR/bin/history-ragd}"
@@ -50,9 +54,11 @@ require_exact CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER vertex
 require_exact CLAUDE_HISTORY_RAG_EMBEDDING_MODEL gemini-embedding-001
 require_exact CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION 3072
 require_exact CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST 127.0.0.1
-require_exact CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT 4680
+PORT=4680
+if [[ "$READ_ONLY" == true ]]; then PORT=4681; fi
+require_exact CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT "$PORT"
 require_exact CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE application_default
-require_exact CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE impersonated_service_account
+case "${CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE:-}" in impersonated_service_account|device_service_account) ;; *) fail "unsupported credential profile" ;; esac
 for required in \
   CLAUDE_HISTORY_RAG_SPANNER_PROJECT \
   CLAUDE_HISTORY_RAG_SPANNER_INSTANCE \
@@ -72,7 +78,8 @@ ANTIGRAVITY_ROOT="${CLAUDE_HISTORY_RAG_ANTIGRAVITY_SESSIONS_PATH:-$HOME/.gemini/
 CHATGPT_ROOT="${CLAUDE_HISTORY_RAG_CHATGPT_EXPORTS_PATH:-$STATE_DIR/imports/chatgpt}"
 CLAUDE_APP_ROOT="${CLAUDE_HISTORY_RAG_CLAUDE_APP_EXPORTS_PATH:-$STATE_DIR/imports/claude-app}"
 WATCH_ROOTS=("$CLAUDE_ROOT" "$CODEX_ROOT" "$GEMINI_ROOT" "$ANTIGRAVITY_ROOT" "$CHATGPT_ROOT" "$CLAUDE_APP_ROOT")
-for root in "${WATCH_ROOTS[@]}"; do
+if [[ "$READ_ONLY" == true ]]; then WATCH_ROOTS=(); fi
+for root in ${WATCH_ROOTS[@]+"${WATCH_ROOTS[@]}"}; do
   require_absolute_clean "$root" "watch root"
 done
 
@@ -81,17 +88,20 @@ install -d -m 700 "$STATE_DIR" "$CONFIG_DIR" "$PLIST_DIR"
 for directory in "$STATE_DIR" "$CONFIG_DIR" "$PLIST_DIR"; do
   [[ -d "$directory" && ! -L "$directory" ]] || fail "managed directory must be a non-link directory"
 done
-for root in "${WATCH_ROOTS[@]}"; do
+for root in ${WATCH_ROOTS[@]+"${WATCH_ROOTS[@]}"}; do
   install -d -m 700 "$root"
   [[ -d "$root" && ! -L "$root" ]] || fail "watch root must be a non-link directory"
 done
 
+WATCH_ROOTS_JSON="[]"
+if [[ "$READ_ONLY" == false ]]; then WATCH_ROOTS_JSON="[\"$CLAUDE_ROOT\", \"$CODEX_ROOT\", \"$GEMINI_ROOT\", \"$ANTIGRAVITY_ROOT\", \"$CHATGPT_ROOT\", \"$CLAUDE_APP_ROOT\"]"; fi
 cat > "$CONFIG_PATH" <<EOF
 {
   "state_dir": "$STATE_DIR",
-  "listen": "127.0.0.1:4680",
+  "listen": "127.0.0.1:$PORT",
+  "read_only": $READ_ONLY,
   "container_mode": false,
-  "watch_roots": ["$CLAUDE_ROOT", "$CODEX_ROOT", "$GEMINI_ROOT", "$ANTIGRAVITY_ROOT", "$CHATGPT_ROOT", "$CLAUDE_APP_ROOT"],
+  "watch_roots": $WATCH_ROOTS_JSON,
   "pid_file": "$STATE_DIR/daemon.pid",
   "auth_state_file": "$STATE_DIR/auth.json",
   "auth_enabled": true,
@@ -120,6 +130,7 @@ cat > "$PLIST_DEST" <<EOF
     <key>HOME</key><string>$HOME</string>
     <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT</key><string>$CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT</string>
+    <key>CLAUDE_HISTORY_RAG_READ_ONLY</key><string>$READ_ONLY</string>
     <key>CLAUDE_HISTORY_RAG_STORAGE_BACKEND</key><string>$CLAUDE_HISTORY_RAG_STORAGE_BACKEND</string>
     <key>CLAUDE_HISTORY_RAG_SPANNER_PROJECT</key><string>$CLAUDE_HISTORY_RAG_SPANNER_PROJECT</string>
     <key>CLAUDE_HISTORY_RAG_SPANNER_INSTANCE</key><string>$CLAUDE_HISTORY_RAG_SPANNER_INSTANCE</string>
@@ -152,5 +163,5 @@ chmod 600 "$PLIST_DEST"
 "$LAUNCHCTL_BIN" bootstrap "gui/$UID" "$PLIST_DEST"
 
 printf 'native launchd agent installed: %s\n' "$PLIST_DEST"
-printf 'liveness: curl --fail http://127.0.0.1:4680/live\n'
-printf 'readiness (authenticated): GET /health returns 503 until Spanner and the watcher are ready\n'
+printf 'liveness: curl --fail http://127.0.0.1:%s/live\n' "$PORT"
+printf 'readiness (authenticated): GET /health checks dependencies for the selected runtime mode\n'

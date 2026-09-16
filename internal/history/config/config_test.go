@@ -47,6 +47,25 @@ func TestLoadClosedAndSafe(t *testing.T) {
 	}
 }
 
+func TestReadOnlyModeCannotStartWatcherOrDisableAuth(t *testing.T) {
+	path, body := validConfig(t)
+	candidate := strings.Replace(body, `"listen":"127.0.0.1:4680"`, `"listen":"127.0.0.1:4681","read_only":true`, 1)
+	if err := os.WriteFile(path, []byte(candidate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{strings.Replace(candidate, `"auth_enabled":true`, `"auth_enabled":false`, 1), strings.Replace(candidate, `"read_only":true`, `"read_only":true,"watch_roots":["/sources"]`, 1), strings.Replace(candidate, "127.0.0.1:4681", "0.0.0.0:4681", 1)} {
+		if err := os.WriteFile(path, []byte(bad), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatal("unsafe read-only configuration accepted")
+		}
+	}
+}
+
 func TestLoadRejectsUnknownDuplicateOversizedAndTrailingData(t *testing.T) {
 	path, body := validConfig(t)
 	cases := map[string]string{

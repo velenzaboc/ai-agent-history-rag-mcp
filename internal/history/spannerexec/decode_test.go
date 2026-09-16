@@ -50,6 +50,10 @@ func TestDecodeValueSupportsHistoryColumnTypes(t *testing.T) {
 			value: genericArray(sppb.TypeCode_FLOAT64, structpb.NewNumberValue(0.25), structpb.NewNumberValue(0.5)),
 			want:  []float64{0.25, 0.5},
 		},
+		"query embedding float32 array": {
+			value: genericArray(sppb.TypeCode_FLOAT32, structpb.NewNumberValue(0.25), structpb.NewNumberValue(0.5)),
+			want:  []float32{0.25, 0.5},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := decodeValue(test.value)

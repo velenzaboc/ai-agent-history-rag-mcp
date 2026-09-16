@@ -91,6 +91,21 @@ require_absent "$INSTALLED_PLIST" 'GOOGLE_APPLICATION_CREDENTIALS|CLOUDSDK_CONFI
 require_literal "$TEST_LOG" "bootstrap gui/$UID $INSTALLED_PLIST" "launchctl bootstrap"
 pass "installer writes protected native loopback LaunchAgent"
 
+legacy_hash="$(shasum -a 256 "$INSTALLED_PLIST")"
+READ_ENV=()
+while IFS=$'\t' read -r key value; do READ_ENV+=("$key=$value"); done < <(plutil -convert json -o - "$INSTALLED_PLIST" | jq -r '.EnvironmentVariables | to_entries[] | [.key,.value] | @tsv')
+: > "$TEST_LOG"
+env "${READ_ENV[@]}" HOME="$TEST_HOME" LAUNCHCTL_BIN="$TEST_LAUNCHCTL" LAUNCHCTL_LOG="$TEST_LOG" HISTORY_RAGD_BIN="$TEST_BIN" \
+ GOOGLE_APPLICATION_CREDENTIALS= CLOUDSDK_CONFIG= CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE= SPANNER_EMULATOR_HOST= \
+ CLAUDE_HISTORY_RAG_READ_ONLY=true CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT=4681 CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE=device_service_account "$INSTALLER"
+SEARCH_CONFIG="$TEST_HOME/.config/ai-agent-history-rag/history-ragd-search.json"
+jq -e '.read_only == true and .watch_roots == [] and .listen == "127.0.0.1:4681"' "$SEARCH_CONFIG" >/dev/null || fail "search mode can start ingestion"
+[[ "$(shasum -a 256 "$INSTALLED_PLIST")" == "$legacy_hash" ]] || fail "search installer changed ingestion agent"
+require_absent "$TEST_LOG" 'com.ai-agent-history-rag.daemon' "search installer touches ingestion label"
+env HOME="$TEST_HOME" LAUNCHCTL_BIN="$TEST_LAUNCHCTL" LAUNCHCTL_LOG="$TEST_LOG" CLAUDE_HISTORY_RAG_READ_ONLY=true "$UNINSTALLER"
+[[ -f "$INSTALLED_PLIST" && ! -f "$SEARCH_CONFIG" ]] || fail "search uninstall touched ingestion"
+pass "read-only install and uninstall preserve ingestion agent"
+
 env HOME="$TEST_HOME" LAUNCHCTL_BIN="$TEST_LAUNCHCTL" LAUNCHCTL_LOG="$TEST_LOG" "$UNINSTALLER"
 [[ ! -e "$INSTALLED_PLIST" && ! -e "$INSTALLED_CONFIG" ]] || fail "uninstaller retained deployed agent material"
 [[ -d "$TEST_HOME/.claude-history-rag" ]] || fail "uninstaller removed durable state without explicit request"

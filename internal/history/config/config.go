@@ -17,6 +17,7 @@ type Config struct {
 	StateDir      string   `json:"state_dir"`
 	Listen        string   `json:"listen"`
 	ContainerMode bool     `json:"container_mode"`
+	ReadOnly      bool     `json:"read_only"`
 	WatchRoots    []string `json:"watch_roots"`
 	PIDFile       string   `json:"pid_file"`
 	AuthStateFile string   `json:"auth_state_file"`
@@ -159,6 +160,12 @@ func expectEOF(decoder *json.Decoder) error {
 
 func (cfg *Config) validate() error {
 	wantListen := "127.0.0.1:4680"
+	if cfg.ReadOnly {
+		if cfg.ContainerMode || !cfg.AuthEnabled || len(cfg.WatchRoots) != 0 {
+			return errors.New("read-only mode requires authenticated host operation without watch roots")
+		}
+		wantListen = "127.0.0.1:4681"
+	}
 	if cfg.ContainerMode {
 		if !cfg.AuthEnabled {
 			return errors.New("container mode requires authentication")
@@ -169,7 +176,7 @@ func (cfg *Config) validate() error {
 		return errors.New("listen does not match the selected runtime mode")
 	}
 	host, port, err := net.SplitHostPort(cfg.Listen)
-	if err != nil || port != "4680" || net.ParseIP(host) == nil {
+	if err != nil || (port != "4680" && !(cfg.ReadOnly && port == "4681")) || net.ParseIP(host) == nil {
 		return errors.New("listen must be a fixed numeric endpoint")
 	}
 	if cfg.ContainerMode && !net.ParseIP(host).IsUnspecified() {
