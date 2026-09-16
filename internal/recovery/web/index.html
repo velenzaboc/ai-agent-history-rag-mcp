@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Work recovery</title>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="assets/styles.css">
+  <link rel="stylesheet" href="assets/responsive.css">
+  <script src="assets/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div>
+          <div class="eyebrow" id="brand-eyebrow">Internal operations</div>
+          <div class="brand-title" id="brand-title">Work recovery</div>
+        </div>
+      </div>
+      <nav class="primary-nav" aria-label="Console views">
+        <button class="nav-item active" data-view="recovery"><span class="nav-glyph">⌁</span><span data-label="inbox">Recovery inbox</span><span class="nav-count" id="inbox-count">–</span></button>
+        <button class="nav-item" data-view="lanes"><span class="nav-glyph">▥</span><span data-label="lanes">Lanes</span></button>
+        <div class="program-nav" id="program-nav"></div>
+        <button class="nav-item" data-view="tasks"><span class="nav-glyph">≡</span><span data-label="tasks">Tasks</span></button>
+        <button class="nav-item" data-view="milestones"><span class="nav-glyph">◇</span><span data-label="milestones">Milestones</span></button>
+        <button class="nav-item" data-view="graph"><span class="nav-glyph">⌘</span><span data-label="graph">Graph</span></button>
+        <button class="nav-item" data-view="search"><span class="nav-glyph">⌕</span><span data-label="history_search">History search</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="source-list" id="source-list"></div>
+        <div class="sidebar-meta"><span id="project-id">–</span><span id="revision">–</span></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow" id="view-eyebrow">Overview</div>
+          <h1 id="view-title">Recovery inbox</h1>
+          <p id="view-subtitle">Loading linked history and task evidence…</p>
+        </div>
+        <div class="topbar-actions">
+          <label class="search-control"><span aria-hidden="true">⌕</span><input id="global-filter" type="search" autocomplete="off" placeholder="Filter this view"></label>
+          <button class="button secondary" id="refresh-button"><span class="refresh-icon" aria-hidden="true">↻</span> Refresh</button>
+        </div>
+      </header>
+
+      <div class="loading-bar" id="loading-bar" aria-hidden="true"></div>
+      <div class="error-banner hidden" id="error-banner" role="alert"></div>
+
+      <section class="metric-grid" id="metric-grid" aria-label="Work overview">
+        <button class="metric-card" data-metric-filter="high"><span class="metric-label">High signal</span><strong id="metric-high">–</strong><span class="metric-note">needs attention</span></button>
+        <button class="metric-card" data-metric-filter="findings"><span class="metric-label">Recovery signals</span><strong id="metric-findings">–</strong><span class="metric-note">across loaded evidence</span></button>
+        <button class="metric-card" data-metric-filter="tasks"><span class="metric-label">Tasks loaded</span><strong id="metric-tasks">–</strong><span class="metric-note" id="metric-task-note">bounded snapshot</span></button>
+        <button class="metric-card" data-metric-filter="sessions"><span class="metric-label">Sessions loaded</span><strong id="metric-sessions">–</strong><span class="metric-note" id="metric-session-note">recent + probed</span></button>
+        <button class="metric-card" data-metric-filter="links"><span class="metric-label">Links resolved</span><strong id="metric-links">–</strong><span class="metric-note">accepted evidence</span></button>
+      </section>
+
+      <section class="coverage-strip" id="coverage-strip"></section>
+
+      <section class="view-panel active" data-panel="recovery">
+        <div class="panel-heading">
+          <div><h2 data-label="inbox">Recovery inbox</h2><p>Evidence-ranked places where work continuity is weakest.</p></div>
+          <div class="filter-chips" id="finding-filters"></div>
+        </div>
+        <div class="table-shell">
+          <table class="data-table">
+            <thead><tr><th>Signal</th><th>Work</th><th>Last evidence</th><th>Age</th><th></th></tr></thead>
+            <tbody id="findings-body"></tbody>
+          </table>
+          <div class="empty-state hidden" id="findings-empty">No recovery signals match this view.</div>
+        </div>
+      </section>
+
+      <section class="view-panel" data-panel="lanes">
+        <div class="panel-heading"><div><h2 data-label="lanes">Lanes</h2><p>Task state grouped by the configured status registry.</p></div></div>
+        <div class="lane-board" id="lane-board"></div>
+      </section>
+
+      <section class="view-panel" data-panel="program">
+        <div class="program-view" id="program-view"></div>
+      </section>
+
+      <section class="view-panel" data-panel="tasks">
+        <div class="panel-heading"><div><h2 data-label="tasks">Tasks</h2><p>Bounded live task-graph projection with work-link density.</p></div></div>
+        <div class="table-shell"><table class="data-table"><thead><tr><th>Task</th><th>Status</th><th>Owner</th><th>Pillar</th><th>Links</th><th>Updated</th></tr></thead><tbody id="tasks-body"></tbody></table><div class="empty-state hidden" id="tasks-empty">No tasks match this view.</div></div>
+      </section>
+
+      <section class="view-panel" data-panel="milestones">
+        <div class="panel-heading"><div><h2 data-label="milestones">Milestones</h2><p>Configured milestone levels with progress rolled up from visible child and dependency tasks.</p></div></div>
+        <div class="milestone-grid" id="milestone-grid"></div>
+      </section>
+
+      <section class="view-panel" data-panel="graph">
+        <div class="panel-heading"><div><h2 data-label="graph">Graph</h2><p>A bounded hierarchy and dependency projection; select a node for task and history context.</p></div><div class="graph-legend" id="graph-legend"></div></div>
+        <div class="graph-shell" id="graph-shell"><svg id="task-graph" role="img" aria-label="Task dependency graph"></svg></div>
+      </section>
+
+      <section class="view-panel" data-panel="search">
+        <div class="panel-heading"><div><h2 data-label="history_search">History search</h2><p>Search older indexed evidence without treating search results as task authority.</p></div></div>
+        <form class="history-form" id="history-form">
+          <label><span>Query</span><input id="history-query" required maxlength="10000" placeholder="What work are you trying to recover?"></label>
+          <label><span>Project filter</span><input id="history-project" placeholder="Optional"></label>
+          <label><span>From</span><input id="history-from" type="date"></label>
+          <label><span>To</span><input id="history-to" type="date"></label>
+          <label class="checkbox-label"><input id="history-files" type="checkbox"><span>File changes</span></label>
+          <button class="button primary" type="submit">Search history</button>
+        </form>
+        <div class="search-results" id="search-results"></div>
+      </section>
+    </main>
+  </div>
+
+  <aside class="detail-drawer" id="detail-drawer" aria-hidden="true" aria-label="Evidence details">
+    <div class="drawer-head"><div><div class="eyebrow" id="drawer-eyebrow">Evidence</div><h2 id="drawer-title">Details</h2></div><button class="icon-button" id="drawer-close" aria-label="Close details">×</button></div>
+    <div class="drawer-body" id="drawer-body"></div>
+    <div class="drawer-actions" id="drawer-actions"></div>
+  </aside>
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

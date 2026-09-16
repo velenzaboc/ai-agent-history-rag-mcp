@@ -15,6 +15,19 @@ model. The daemon has no local-storage or unauthenticated production mode.
 | Windows | `scripts/install-windows.ps1` | Per-user logon task runs `history-ragd.exe supervise`. |
 | MCP | `scripts/history-rag-mcp-native.sh` | Authenticated STDIO proxy to the loopback daemon. |
 
+## Work recovery console
+
+The repository also includes a config-driven, read-only browser console that
+joins task-graph state to AI history evidence. It surfaces a KANBAN view,
+config-driven program subtree pages, hierarchy and dependency graphs,
+milestones, abandoned or unlinked sessions, history search, copyable
+history-first restart prompts, automatic multipass related-work discovery on
+every task open, and task prompts that carry the same discovery packet—all
+without creating a second work-state store or merging tasks by inference.
+
+See [Work Recovery Console](docs/WORK_RECOVERY_CONSOLE.md) and the
+[complete example configuration](configs/work-recovery-console.example.json).
+
 The repository's Compose file is retained as a compatibility artifact and is
 not a supported native production operator entrypoint. Use the Dockerfile or a
 platform installer until that artifact is separately migrated.

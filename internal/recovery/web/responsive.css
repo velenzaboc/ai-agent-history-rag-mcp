@@ -1,0 +1,59 @@
+.graph-parent-edge {
+  stroke: color-mix(in srgb, var(--accent-alt) 34%, transparent);
+  stroke-dasharray: 4 3;
+}
+
+@media (min-width: 761px) and (max-width: 1100px) {
+  .app-shell {
+    grid-template-columns: 202px minmax(0, 1fr);
+  }
+}
+
+.program-nav { display: contents; }
+.program-view { display: flex; flex-direction: column; gap: 12px; }
+.program-loading { padding: 64px; text-align: center; color: var(--muted); border: 1px solid color-mix(in srgb, var(--muted) 14%, transparent); border-radius: 12px; background: var(--surface); }
+.program-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 22px; border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); border-radius: 12px; background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 9%, var(--surface)), color-mix(in srgb, var(--accent-alt) 5%, var(--surface))); }
+.program-hero h2 { font-size: 22px; letter-spacing: -.025em; margin: 5px 0; }
+.program-hero p { color: var(--muted); margin: 0; max-width: 760px; }
+.program-health { display: flex; flex-direction: column; align-items: flex-end; min-width: 120px; color: var(--warning); }
+.program-health.complete { color: var(--success); }
+.program-health strong { font-size: 25px; line-height: 1; }
+.program-health span { font-size: 10px; margin-top: 5px; text-transform: uppercase; letter-spacing: .06em; }
+.program-facts { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)); gap: 8px; }
+.program-fact, .program-source { padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--muted) 13%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--surface) 72%, transparent); }
+.program-fact { display: flex; flex-direction: column; gap: 3px; }
+.program-fact span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
+.program-fact strong { font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+.program-source { grid-column: 1 / -1; padding: 14px; }
+.program-source h3 { margin: 4px 0 2px; font-size: 14px; }
+.program-source p { margin: 8px 0; color: var(--muted); font-size: 11px; }
+.program-checkpoint { margin-top: 7px; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.program-lane-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.program-lane-card { min-width: 0; padding: 14px; border: 1px solid color-mix(in srgb, var(--muted) 14%, transparent); border-radius: 10px; background: linear-gradient(145deg, var(--surface), color-mix(in srgb, var(--surface-alt) 72%, var(--surface))); cursor: pointer; transition: transform .14s, border-color .14s; }
+.program-lane-card:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.program-lane-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.program-lane-head h3 { font-size: 14px; line-height: 1.3; margin: 5px 0 0; }
+.program-lane-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 9px; margin: 11px 0; }
+.program-stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: 5px; margin: 11px 0; }
+.program-stage { padding: 6px 7px; border-top: 2px solid var(--stage-color, var(--muted)); border-radius: 6px; background: color-mix(in srgb, var(--surface-alt) 60%, transparent); min-width: 0; }
+.program-stage span, .program-stage strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.program-stage span { color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: .06em; }
+.program-stage strong { font-size: 9px; margin-top: 2px; }
+.program-focus-list { display: flex; flex-direction: column; gap: 4px; margin-top: 9px; }
+.program-focus-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; width: 100%; padding: 6px 7px; border: 0; border-radius: 6px; background: color-mix(in srgb, var(--background) 48%, transparent); color: var(--text); font: 10px inherit; text-align: left; cursor: pointer; }
+.program-focus-task:hover { background: color-mix(in srgb, var(--accent) 8%, var(--background)); }
+.program-focus-task span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.program-focus-task small { color: var(--muted); font-size: 8px; }
+.program-lane-card .progress-caption { margin-bottom: 0; }
+
+@media (max-width: 1100px) {
+  .program-lane-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .program-facts { grid-template-columns: repeat(3, minmax(110px, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .program-nav { display: flex; }
+  .program-hero { align-items: flex-start; flex-direction: column; }
+  .program-health { align-items: flex-start; }
+  .program-facts, .program-lane-grid { grid-template-columns: 1fr; }
+}
