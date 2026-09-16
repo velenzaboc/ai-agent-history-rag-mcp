@@ -368,7 +368,9 @@ tool_catalog() {
 emit_result() {
   local id="$1"
   local result="$2"
-  jq -cn --argjson id "$id" --argjson result "$result" '{jsonrpc:"2.0", id:$id, result:$result}'
+  # The result travels on stdin: daemon payloads exceed the Windows
+  # command-line limit and an argv-borne payload kills the server.
+  jq -c --argjson id "$id" '{jsonrpc:"2.0", id:$id, result:.}' <<<"$result"
 }
 
 emit_error() {
@@ -491,7 +493,7 @@ handle_tool_call() {
     emit_tool_error "$id" "Local daemon request failed"
     return
   fi
-  result="$(jq -cn --argjson data "$DAEMON_RESPONSE" '{content:[{type:"text",text:($data|tojson)}],structuredContent:$data,isError:false}')"
+  result="$(jq -c '{content:[{type:"text",text:tojson}],structuredContent:.,isError:false}' <<<"$DAEMON_RESPONSE")"
   emit_result "$id" "$result"
 }
 
