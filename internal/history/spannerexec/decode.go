@@ -42,6 +42,8 @@ func decodeValue(value spanner.GenericColumnValue) (any, error) {
 			target = new([]string)
 		case sppb.TypeCode_FLOAT64:
 			target = new([]float64)
+		case sppb.TypeCode_FLOAT32:
+			target = new([]float32)
 		}
 	}
 	if target == nil {
@@ -67,6 +69,8 @@ func decodeValue(value spanner.GenericColumnValue) (any, error) {
 		return *typed, nil
 	case *[]float64:
 		return *typed, nil
+	case *[]float32:
+		return *typed, nil
 	default:
 		return nil, fmt.Errorf("decode Spanner column type %s produced unsupported destination %T", value.Type, target)
 	}
@@ -77,7 +81,7 @@ func supportedColumnType(columnType *sppb.Type) bool {
 	case sppb.TypeCode_STRING, sppb.TypeCode_INT64, sppb.TypeCode_BOOL, sppb.TypeCode_FLOAT64, sppb.TypeCode_TIMESTAMP, sppb.TypeCode_BYTES:
 		return true
 	case sppb.TypeCode_ARRAY:
-		return columnType.ArrayElementType != nil && (columnType.ArrayElementType.Code == sppb.TypeCode_STRING || columnType.ArrayElementType.Code == sppb.TypeCode_FLOAT64)
+		return columnType.ArrayElementType != nil && (columnType.ArrayElementType.Code == sppb.TypeCode_STRING || columnType.ArrayElementType.Code == sppb.TypeCode_FLOAT64 || columnType.ArrayElementType.Code == sppb.TypeCode_FLOAT32)
 	default:
 		return false
 	}

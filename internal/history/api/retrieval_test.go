@@ -86,3 +86,17 @@ func TestRetrievalRejectsInvalidInputBeforeStore(t *testing.T) {
 		t.Fatalf("missing backend=%d", r.Code)
 	}
 }
+
+func TestReadOnlyReadinessRequiresStoreAndNeverClaimsWatcher(t *testing.T) {
+	s, err := New(Config{ReadOnly: true, AuthEnabled: true, Retrieval: &retrievalFake{}}, fakeVerifier{key: "secret"}, []Readiness{dependency{name: "store"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := request(t, s.Handler(), http.MethodGet, "/status", "Bearer secret", "")
+	if r.Code != 200 || strings.Contains(r.Body.String(), "watcher") {
+		t.Fatalf("read-only status=%d %s", r.Code, r.Body)
+	}
+	if _, err = New(Config{ReadOnly: true, Retrieval: &retrievalFake{}}, nil, nil); err == nil {
+		t.Fatal("unauthenticated read-only accepted")
+	}
+}

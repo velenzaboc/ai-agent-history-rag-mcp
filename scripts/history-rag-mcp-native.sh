@@ -176,7 +176,11 @@ validate_production_contract() {
   exact_value CLAUDE_HISTORY_RAG_EMBEDDING_MODEL gemini-embedding-001
   exact_value CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION 3072
   exact_value CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST 127.0.0.1
-  exact_value CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT 4680
+  case "${CLAUDE_HISTORY_RAG_READ_ONLY-false}" in
+    true) exact_value CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT 4681; DAEMON_BASE_URL="http://127.0.0.1:4681" ;;
+    false) exact_value CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT 4680 ;;
+    *) contract_fail "CLAUDE_HISTORY_RAG_READ_ONLY must be true or false" ;;
+  esac
   exact_value CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE application_default
   required_value CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY
 
@@ -186,6 +190,12 @@ validate_production_contract() {
   validate_source_paths
 
   case "${CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE-}" in
+    device_service_account)
+      [[ -z "${GOOGLE_APPLICATION_CREDENTIALS-}" && -z "${CLOUDSDK_CONFIG-}" ]] || contract_fail "device_service_account uses only the well-known device carrier"
+      local device_adc="$HOME/.config/gcloud/application_default_credentials.json"
+      secure_regular_file "$device_adc" "device ADC carrier"
+      jq -e --arg identity "$CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY" '(.type == "impersonated_service_account") and (.source_credentials.type == "service_account") and (.source_credentials.client_email == $identity)' "$device_adc" >/dev/null 2>&1 || contract_fail "device ADC source identity does not match credentials_identity"
+      ;;
     impersonated_service_account)
       validate_impersonated_adc "${GOOGLE_APPLICATION_CREDENTIALS-}" "$CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY"
       ;;
@@ -553,7 +563,7 @@ serve_stdio() {
 projected_environment() {
   local keys=(
     HOME PATH CLOUDSDK_CONFIG GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS
-    CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE
+    CLAUDE_HISTORY_RAG_READ_ONLY CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE
     CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY
     CLAUDE_HISTORY_RAG_STORAGE_BACKEND CLAUDE_HISTORY_RAG_SPANNER_PROJECT
     CLAUDE_HISTORY_RAG_SPANNER_INSTANCE CLAUDE_HISTORY_RAG_SPANNER_DATABASE

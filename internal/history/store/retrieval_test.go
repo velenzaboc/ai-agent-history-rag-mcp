@@ -14,7 +14,7 @@ func TestSummariesFilterBeforeLimitAndKeepLatestPerSession(t *testing.T) {
 		t.Fatalf("Summaries=%#v %v", rows, err)
 	}
 	q := e.queries[0]
-	for _, part := range []string{"SessionId = @session_id", "ChunkType = @chunk_type", "PARTITION BY SessionId", "ORDER BY Timestamp DESC, Id", "LIMIT 2"} {
+	for _, part := range []string{"SessionId = @session_id", "ChunkType = @chunk_type", "GROUP BY SessionId", "ORDER BY Timestamp DESC, Id LIMIT 1", "LIMIT 2"} {
 		if !strings.Contains(q.SQL, part) {
 			t.Errorf("missing %s: %s", part, q.SQL)
 		}

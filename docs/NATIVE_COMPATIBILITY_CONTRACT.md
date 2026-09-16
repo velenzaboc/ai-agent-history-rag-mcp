@@ -28,6 +28,12 @@ outside that object, unapproved source fields, target drift, and non-owner ACLs
 are rejected. Credential material and machine-specific paths remain deployment
 state, never repository content.
 
+The explicit `device_service_account` profile uses that carrier's existing
+nested service-account source directly. `credentials_identity` must equal the
+source email. It does not impersonate the carrier's target, modify shared ADC,
+create keys, or fall back to user credentials. The same source-field, canonical
+Google endpoint, private-file, scope, and transport-override checks apply.
+
 ## Source and state boundary
 
 Configuration carries six unique absolute roots: Claude Code, Codex, Gemini,
@@ -41,6 +47,13 @@ identity-checked so link substitution and path replacement fail closed.
 `GET /status` require a bearer credential and are ready only when both storage
 and watcher dependencies succeed. A dependency failure is a 503 readiness
 response, not a successful health response.
+
+An explicit authenticated host-only `read_only` configuration uses
+`127.0.0.1:4681` and an empty watch-root list. Its runtime and MCP environments
+set `CLAUDE_HISTORY_RAG_READ_ONLY=true` and the matching status port. Readiness
+then reports storage only; it makes no watcher or indexing claim. This mode
+serves an existing corpus without taking over ingestion. All other runtime
+modes retain their original endpoint and watcher requirement.
 
 The bounded native HTTP surface additionally supports cursor-mutation refusal
 and authenticated authority rotation endpoints. It has no dashboard or metrics

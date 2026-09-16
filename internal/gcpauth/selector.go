@@ -29,6 +29,7 @@ const (
 	CredentialsSourceApplicationDefault                = "application_default"
 	CredentialsProfileImpersonatedServiceAccount       = "impersonated_service_account"
 	CredentialsProfileAttachedServiceAccount           = "attached_service_account"
+	CredentialsProfileDeviceServiceAccount             = "device_service_account"
 	CloudPlatformScope                                 = "https://www.googleapis.com/auth/cloud-platform"
 	maxCredentialConfigurationBytes              int64 = 1 << 20
 )
@@ -129,7 +130,7 @@ func (s Selector) Validate(label string) error {
 		return fmt.Errorf("%s: credentials_identity %q is not a canonical user-managed service-account email", label, s.CredentialsIdentity)
 	}
 	switch s.CredentialsProfile {
-	case CredentialsProfileImpersonatedServiceAccount, CredentialsProfileAttachedServiceAccount:
+	case CredentialsProfileImpersonatedServiceAccount, CredentialsProfileAttachedServiceAccount, CredentialsProfileDeviceServiceAccount:
 		return nil
 	case "":
 		return fmt.Errorf("%s: credentials_profile is required", label)
@@ -182,6 +183,8 @@ func (s Selector) tokenSource(ctx context.Context, detachRefresh bool, scopes ..
 		return s.impersonatedTokenSource(ctx, scopes, detachRefresh)
 	case CredentialsProfileAttachedServiceAccount:
 		return s.attachedTokenSource(ctx, scopes, detachRefresh)
+	case CredentialsProfileDeviceServiceAccount:
+		return s.deviceTokenSource(ctx, scopes, detachRefresh)
 	default:
 		return nil, fmt.Errorf("google_credentials: unsupported credentials_profile %q", s.CredentialsProfile)
 	}

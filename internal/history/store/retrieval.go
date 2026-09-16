@@ -51,13 +51,16 @@ func (s *SpannerStore) Summaries(ctx context.Context, filter Filter, limit int) 
 	if err != nil {
 		return nil, err
 	}
-	statement := Statement{SQL: fmt.Sprintf(`SELECT Id, Content, ChunkType, SessionId, ProjectPath, ProjectName,
- Timestamp, FilePath, Operation, MachineId, CAST(0 AS FLOAT64) AS Distance
- FROM (SELECT Id, Content, ChunkType, SessionId, ProjectPath, ProjectName,
- Timestamp, FilePath, Operation, MachineId,
- ROW_NUMBER() OVER (PARTITION BY SessionId ORDER BY Timestamp DESC, Id) AS position
- FROM ConversationChunks WHERE %s)
- WHERE position = 1 ORDER BY Timestamp DESC, Id LIMIT %d`, strings.Join(clauses, " AND "), limit), Params: params}
+	statement := Statement{SQL: fmt.Sprintf(`WITH Latest AS (
+ SELECT ARRAY_AGG(STRUCT(Id, Timestamp)
+ ORDER BY Timestamp DESC, Id LIMIT 1)[OFFSET(0)] AS summary
+ FROM ConversationChunks WHERE %s GROUP BY SessionId), Recent AS (
+ SELECT summary.Id AS Id, summary.Timestamp AS Timestamp FROM Latest
+ ORDER BY summary.Timestamp DESC, summary.Id LIMIT %d)
+ SELECT c.Id, c.Content, c.ChunkType, c.SessionId, c.ProjectPath, c.ProjectName,
+ c.Timestamp, c.FilePath, c.Operation, c.MachineId, CAST(0 AS FLOAT64) AS Distance
+ FROM Recent r JOIN ConversationChunks c ON c.Id=r.Id
+ ORDER BY r.Timestamp DESC,r.Id`, strings.Join(clauses, " AND "), limit), Params: params}
 	rows, err := s.executor.Query(ctx, statement)
 	if err != nil {
 		return nil, err

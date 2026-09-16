@@ -52,6 +52,9 @@ func (r storeReadiness) Ready(ctx context.Context) error {
 	if r.store == nil {
 		return errors.New("Spanner store is required")
 	}
+	if live, ok := r.store.(interface{ Ready(context.Context) error }); ok {
+		return live.Ready(ctx)
+	}
 	_, err := r.store.Stats(ctx)
 	return err
 }
@@ -154,14 +157,27 @@ func run(arguments []string) error {
 	}
 
 	var dependencies []api.Readiness
+	var retrieval api.Retrieval
 	var stopWatcher context.CancelFunc
 	watchResult := make(chan error, 1)
 	if strings.TrimSpace(os.Getenv("CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT")) != "" {
+		if cfg.ReadOnly != (os.Getenv("CLAUDE_HISTORY_RAG_READ_ONLY") == "true") {
+			return errors.New("configuration and runtime read-only modes disagree")
+		}
 		historyStore, err := newProductionStore(context.Background(), os.Getenv)
 		if err != nil {
 			return err
 		}
 		defer historyStore.Close()
+		retrieval, _ = historyStore.(api.Retrieval)
+		if indexes, ok := historyStore.(interface{ DiscoverIndexes(context.Context) error }); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err := indexes.DiscoverIndexes(ctx)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("discover search index: %w", err)
+			}
+		}
 		dependencies = append(dependencies, storeReadiness{store: historyStore})
 		if len(cfg.WatchRoots) != 0 {
 			producer, err := watch.NewProducer(watch.Registry{MachineID: "history-ragd", MaxBytes: watch.MaxSourceSnapshotBytes}, historyStore, cfg.WatchRoots, time.Second)
@@ -204,7 +220,7 @@ func run(arguments []string) error {
 	// The production store is live when the explicit production contract is
 	// present. Watcher readiness remains deliberately absent until source-watch
 	// ownership is cut over, so the API remains deterministically not-ready.
-	apiServer, err := api.New(api.Config{AuthEnabled: cfg.AuthEnabled}, verifier, dependencies)
+	apiServer, err := api.New(api.Config{AuthEnabled: cfg.AuthEnabled, Retrieval: retrieval, ReadOnly: cfg.ReadOnly}, verifier, dependencies)
 	if err != nil {
 		return err
 	}
