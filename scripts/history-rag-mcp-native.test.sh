@@ -328,6 +328,31 @@ grep -Eq '^Authorization: Bearer SYNTHETIC_PSK_FOR_TEST_ONLY$' "$protocol/curl-h
 pass "MCP lifecycle and five-tool daemon proxy"
 pass "daemon authorization is not carried in argv"
 
+large="$TMP_ROOT/large-response"
+mkdir -p "$large/bin"
+# A daemon payload above the per-argument limit (Windows command line, Linux
+# MAX_ARG_STRLEN) must travel to jq on stdin, never as an argument.
+jq -cn '{ok:true, results:[range(0;2000) | {content:("x" * 100)}]}' >"$large/response.json"
+printf '#!/usr/bin/env bash\n[[ " $* " == *" --data-binary @- "* ]] && cat >/dev/null\ncat %q\nprintf "\\n200"\n' "$large/response.json" >"$large/bin/curl"
+chmod +x "$large/bin/curl"
+write_adc "$large/adc.json" authorized_user false '[]' "$identity"
+fixture_env "$large" "$large/adc.json" impersonated_service_account
+FIXTURE_ENV[1]="PATH=$large/bin:$PATH"
+FIXTURE_ENV+=("CLAUDE_HISTORY_RAG_AUTH_ENABLED=true" "CLAUDE_HISTORY_RAG_SERVER_PSK=SYNTHETIC_PSK_FOR_TEST_ONLY")
+# shellcheck disable=SC2119
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_conversations","arguments":{"query":"needle"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"ping"}'
+} | run_fixture >"$large/output" 2>"$large/stderr" || fail "large daemon response terminated the MCP server: $(cat "$large/stderr")"
+jq -s -e '
+  length == 3 and
+  .[1].id == 2 and .[1].result.isError == false and (.[1].result.structuredContent.results | length) == 2000 and
+  .[2].id == 3
+' "$large/output" >/dev/null || fail "large daemon response was not relayed intact"
+pass "large daemon response is relayed without an argv-borne payload"
+
 auth_state="$TMP_ROOT/auth-state"
 mkdir -p "$auth_state/bin" "$auth_state/home/.claude-history-rag"
 printf '#!/usr/bin/env bash\nprintf invoked >%q\nheader_file=""\nprevious=""\nfor argument in "$@"; do\n  if [[ "$previous" == "--header" && "$argument" == @* ]]; then header_file="${argument#@}"; fi\n  previous="$argument"\ndone\nif [[ -n "$header_file" && -r "$header_file" ]]; then cat "$header_file" >%q; elif [[ -r /dev/fd/3 ]]; then cat /dev/fd/3 >%q; fi\nprintf "{\\"ok\\":true}\\n200"\n' \
