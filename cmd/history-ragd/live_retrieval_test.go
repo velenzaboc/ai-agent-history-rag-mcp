@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 import (
@@ -13,7 +15,7 @@ import (
 // initializes schema, embeds stored chunks, or invokes a write method.
 func TestLiveRetrieval(t *testing.T) {
 	if os.Getenv("HISTORY_RAG_LIVE_READ_CHECK") != "true" {
-		t.Skip("operator opt-in required")
+		t.Fatal("operator opt-in required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
 	defer cancel()
