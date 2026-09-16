@@ -30,6 +30,7 @@ type Readiness interface {
 type Config struct {
 	AuthEnabled bool
 	Authority   historyauth.Authority
+	Retrieval   Retrieval
 }
 
 type readinessDependency struct {
@@ -90,7 +91,7 @@ func (s *Server) HTTPServer(address string) *http.Server {
 		Handler:           s.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      65 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    MaxHeaderBytes,
 	}
@@ -102,6 +103,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /health", s.withAuth(s.handleReadiness))
 	mux.HandleFunc("GET /status", s.withAuth(s.handleReadiness))
 	mux.HandleFunc("POST /api/positions", s.withAuth(s.handleCursorMutation))
+	mux.HandleFunc("POST /api/search", s.withAuth(s.handleSearch))
+	mux.HandleFunc("POST /api/search/files", s.withAuth(s.handleFileSearch))
+	mux.HandleFunc("POST /api/sessions", s.withAuth(s.handleSessions))
 	if s.config.Authority != nil {
 		mux.HandleFunc("GET /api/auth/state", s.withAuth(s.handleAuthState))
 		mux.HandleFunc("POST /api/auth/rotate", s.withAuth(s.handleAuthRotate))

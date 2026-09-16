@@ -46,6 +46,14 @@ The bounded native HTTP surface additionally supports cursor-mutation refusal
 and authenticated authority rotation endpoints. It has no dashboard or metrics
 operator surface.
 
+Authenticated `POST /api/search`, `/api/search/files`, and `/api/sessions`
+serve the existing MCP retrieval contract. Search binds project and inclusive
+date filters; file search additionally binds file path and operation. Session
+retrieval applies the session filter before selecting the latest stored summary
+per session. These routes never initialize schema, backfill, or write chunks.
+Requests are bounded to 64 KiB, results to 8 MiB, and database work to 60 seconds.
+Oversized results fail explicitly instead of silently truncating source evidence.
+
 ## Evidence
 
 `scripts/docs-native-contract.test.sh` checks the operator documentation and
