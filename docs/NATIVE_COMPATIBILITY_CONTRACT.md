@@ -36,10 +36,24 @@ Google endpoint, private-file, scope, and transport-override checks apply.
 
 ## Source and state boundary
 
-Configuration carries six unique absolute roots: Claude Code, Codex, Gemini,
-Antigravity, ChatGPT export, and Claude app export. State, authentication, and
+Native workstation configuration carries eight unique absolute roots covering
+six source families: the Claude Code, Codex, Gemini, Antigravity, ChatGPT
+export, and Claude app export defaults plus stable Claude and Codex
+profile-parent roots. The profile parents let newly created native profiles be
+discovered without changing the configured root set; non-transcript credential
+JSON does not match a registry source grammar. State, authentication, and
 cursor files are held in a private state directory. Roots and snapshots are
 identity-checked so link substitution and path replacement fail closed.
+
+Native capture is forward-only. Before the first sink write, the watcher
+atomically persists its source-root identities, enablement cutoff, and a
+metadata-only exclusion of every existing recognized source path. Excluded
+paths and sessions remain excluded across mutation, replacement, rotation, and
+restart. A newly discovered source is eligible only when its source-structural
+conversation timestamps prove every meaningful record is at or after the
+cutoff; copied history and unknown timestamps fail closed. Successful snapshots
+are durably acknowledged only after their sink write succeeds, and unchanged
+acknowledged snapshots are not resubmitted.
 
 ## HTTP boundary
 

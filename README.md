@@ -87,6 +87,17 @@ missing directories and generate owner-protected native configuration.
 ChatGPT and Claude app exports belong in their respective drop folders. The
 watcher preserves source identity and rejects unsafe path changes.
 
+Native workstation deployments pin eight roots: the six defaults above plus
+stable Claude and Codex provider-profile parent directories. This lets newly
+created profiles become visible without replacing the persisted root set;
+non-transcript credential JSON remains outside the registry's source grammar.
+
+On first enablement, the daemon records every already-present recognized source
+path as a permanent exclusion and persists a per-host cutoff before it can
+upload anything. Only complete conversations whose source-record timestamps are
+at or after that cutoff are captured. Existing paths, copied older sessions,
+and records without provable source timestamps are never backfilled.
+
 ## Container
 
 Copy `.env.docker.example` to a private environment file, replace each

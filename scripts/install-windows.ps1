@@ -32,9 +32,21 @@ function Require-CleanAbsolutePath([string]$Path, [string]$Label) {
 function Set-CurrentUserOnlyAcl([string]$Path) {
     $Identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
     if ($null -eq $Identity) { Fail "current Windows identity is unavailable" }
-    $Acl = New-Object Security.AccessControl.FileSecurity
+    $Rights = [Security.AccessControl.FileSystemRights]::FullControl
+    $Propagation = [Security.AccessControl.PropagationFlags]::None
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $Acl = [Security.AccessControl.DirectorySecurity]::new()
+        $Inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $Acl = [Security.AccessControl.FileSecurity]::new()
+        $Inheritance = [Security.AccessControl.InheritanceFlags]::None
+    } else {
+        Fail "ACL target does not exist"
+    }
     $Acl.SetAccessRuleProtection($true, $false)
-    $Rule = New-Object Security.AccessControl.FileSystemAccessRule($Identity, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $Acl.SetOwner($Identity)
+    $Rule = [Security.AccessControl.FileSystemAccessRule]::new($Identity, $Rights, $Inheritance, $Propagation, $Allow)
     $Acl.SetAccessRule($Rule)
     Set-Acl -LiteralPath $Path -AclObject $Acl
 }
@@ -96,8 +108,10 @@ $GeminiRoot = Require-CleanAbsolutePath ($(if ($env:CLAUDE_HISTORY_RAG_GEMINI_SE
 $AntigravityRoot = Require-CleanAbsolutePath ($(if ($env:CLAUDE_HISTORY_RAG_ANTIGRAVITY_SESSIONS_PATH) { $env:CLAUDE_HISTORY_RAG_ANTIGRAVITY_SESSIONS_PATH } else { Join-Path $env:USERPROFILE ".gemini\antigravity" })) "Antigravity watch root"
 $ChatGPTRoot = Require-CleanAbsolutePath ($(if ($env:CLAUDE_HISTORY_RAG_CHATGPT_EXPORTS_PATH) { $env:CLAUDE_HISTORY_RAG_CHATGPT_EXPORTS_PATH } else { Join-Path $DataDir "imports\chatgpt" })) "ChatGPT watch root"
 $ClaudeAppRoot = Require-CleanAbsolutePath ($(if ($env:CLAUDE_HISTORY_RAG_CLAUDE_APP_EXPORTS_PATH) { $env:CLAUDE_HISTORY_RAG_CLAUDE_APP_EXPORTS_PATH } else { Join-Path $DataDir "imports\claude-app" })) "Claude App watch root"
-$WatchRoots = @($ClaudeRoot, $CodexRoot, $GeminiRoot, $AntigravityRoot, $ChatGPTRoot, $ClaudeAppRoot)
-if (($WatchRoots | Select-Object -Unique).Count -ne 6) { Fail "watch roots must be unique" }
+$ClaudeProfileRoot = Require-CleanAbsolutePath (Join-Path $env:USERPROFILE ".velenza\provider-profiles\claude") "Claude profile watch root"
+$CodexProfileRoot = Require-CleanAbsolutePath (Join-Path $env:USERPROFILE ".velenza\provider-profiles\codex") "Codex profile watch root"
+$WatchRoots = @($ClaudeRoot, $CodexRoot, $GeminiRoot, $AntigravityRoot, $ChatGPTRoot, $ClaudeAppRoot, $ClaudeProfileRoot, $CodexProfileRoot)
+if (($WatchRoots | Select-Object -Unique).Count -ne 8) { Fail "watch roots must be unique" }
 
 New-PrivateDirectory $DataDir
 New-PrivateDirectory $ConfigDir

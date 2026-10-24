@@ -28,6 +28,8 @@ type Producer struct {
 	sink     ChunkSink
 	roots    []*PinnedRoot
 	interval time.Duration
+	scanMu   sync.Mutex
+	forward  *forwardTracker
 	mu       sync.RWMutex
 	ready    bool
 	closed   bool
@@ -103,6 +105,8 @@ func (p *Producer) Run(ctx context.Context) error {
 }
 
 func (p *Producer) Scan(ctx context.Context) error {
+	p.scanMu.Lock()
+	defer p.scanMu.Unlock()
 	if ctx == nil {
 		return errors.New("watch producer context is required")
 	}
@@ -115,7 +119,11 @@ func (p *Producer) Scan(ctx context.Context) error {
 		return fs.ErrClosed
 	}
 	roots := append([]*PinnedRoot(nil), p.roots...)
+	forward := p.forward
 	p.mu.RUnlock()
+	if forward != nil {
+		return p.scanForward(ctx, roots, forward)
+	}
 	seen := 0
 	for _, root := range roots {
 		if err := filepath.WalkDir(root.Path(), func(path string, entry fs.DirEntry, walkErr error) error {

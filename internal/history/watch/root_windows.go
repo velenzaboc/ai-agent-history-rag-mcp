@@ -203,7 +203,11 @@ func (r *platformRoot) snapshot(rootPath, sourcePath string, parts []string, max
 	if err != nil {
 		return nil, ErrUnsafeSource
 	}
-	snapshot, err := newPrivateSnapshot(sourcePath, source, before.Size(), before.ModTime(), maxBytes)
+	sourceIdentity := RootIdentity{
+		Volume: uint64(identity.VolumeSerialNumber),
+		Object: uint64(identity.FileIndexHigh)<<32 | uint64(identity.FileIndexLow),
+	}
+	snapshot, err := newPrivateSnapshotWithIdentity(sourcePath, source, before.Size(), before.ModTime(), maxBytes, sourceIdentity)
 	if err != nil {
 		return nil, err
 	}
