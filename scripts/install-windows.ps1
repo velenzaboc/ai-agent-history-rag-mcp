@@ -32,9 +32,21 @@ function Require-CleanAbsolutePath([string]$Path, [string]$Label) {
 function Set-CurrentUserOnlyAcl([string]$Path) {
     $Identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
     if ($null -eq $Identity) { Fail "current Windows identity is unavailable" }
-    $Acl = New-Object Security.AccessControl.FileSecurity
+    $Rights = [Security.AccessControl.FileSystemRights]::FullControl
+    $Propagation = [Security.AccessControl.PropagationFlags]::None
+    $Allow = [Security.AccessControl.AccessControlType]::Allow
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $Acl = [Security.AccessControl.DirectorySecurity]::new()
+        $Inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $Acl = [Security.AccessControl.FileSecurity]::new()
+        $Inheritance = [Security.AccessControl.InheritanceFlags]::None
+    } else {
+        Fail "ACL target does not exist"
+    }
     $Acl.SetAccessRuleProtection($true, $false)
-    $Rule = New-Object Security.AccessControl.FileSystemAccessRule($Identity, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $Acl.SetOwner($Identity)
+    $Rule = [Security.AccessControl.FileSystemAccessRule]::new($Identity, $Rights, $Inheritance, $Propagation, $Allow)
     $Acl.SetAccessRule($Rule)
     Set-Acl -LiteralPath $Path -AclObject $Acl
 }

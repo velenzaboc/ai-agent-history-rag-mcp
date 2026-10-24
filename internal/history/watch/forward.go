@@ -393,6 +393,16 @@ func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, pat
 	if err != nil {
 		return err
 	}
+	snapshotIdentity := snapshot.SourceIdentity()
+	if snapshotIdentity == (RootIdentity{}) || snapshotIdentity != identity {
+		if closeErr := snapshot.Close(); closeErr != nil {
+			return closeErr
+		}
+		return ErrSourceChanged
+	}
+	if tracker.state.ExcludedObjects[forwardIdentityKey(snapshotIdentity)] {
+		return snapshot.Close()
+	}
 	digestBytes := snapshot.SHA256()
 	digest := hex.EncodeToString(digestBytes[:])
 	if tracker.state.Progress[path] == digest {

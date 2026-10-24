@@ -140,6 +140,7 @@ type Snapshot struct {
 	path       string
 	directory  string
 	sourcePath string
+	identity   RootIdentity
 	size       int64
 	modTime    time.Time
 	digest     [sha256.Size]byte
@@ -149,6 +150,9 @@ type Snapshot struct {
 }
 
 func (s *Snapshot) SourcePath() string { return s.sourcePath }
+func (s *Snapshot) SourceIdentity() RootIdentity {
+	return s.identity
+}
 func (s *Snapshot) Size() int64        { return s.size }
 func (s *Snapshot) ModTime() time.Time { return s.modTime }
 func (s *Snapshot) SHA256() [sha256.Size]byte {
@@ -197,6 +201,10 @@ func (s *Snapshot) Close() error {
 }
 
 func newPrivateSnapshot(sourcePath string, source *os.File, sourceSize int64, modTime time.Time, maxBytes int64) (*Snapshot, error) {
+	return newPrivateSnapshotWithIdentity(sourcePath, source, sourceSize, modTime, maxBytes, RootIdentity{})
+}
+
+func newPrivateSnapshotWithIdentity(sourcePath string, source *os.File, sourceSize int64, modTime time.Time, maxBytes int64, identity RootIdentity) (*Snapshot, error) {
 	if sourceSize < 0 || sourceSize > maxBytes {
 		return nil, ErrSnapshotLimit
 	}
@@ -258,6 +266,7 @@ func newPrivateSnapshot(sourcePath string, source *os.File, sourceSize int64, mo
 		path:       path,
 		directory:  directory,
 		sourcePath: sourcePath,
+		identity:   identity,
 		size:       sourceSize,
 		modTime:    modTime,
 		digest:     digest,
