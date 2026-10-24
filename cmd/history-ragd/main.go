@@ -72,6 +72,7 @@ func (r watcherReadiness) Ready(ctx context.Context) error {
 var (
 	loadProductionRuntime = runtimeconfig.LoadProduction
 	newProductionStore    = openProductionStore
+	newWatchProducer      = watch.NewForwardProducer
 	newSpannerExecutor    = func(ctx context.Context, database string, selector runtimeconfig.Config) (store.Executor, error) {
 		return spannerexec.New(ctx, database, selector.GoogleCredentials)
 	}
@@ -180,7 +181,11 @@ func run(arguments []string) error {
 		}
 		dependencies = append(dependencies, storeReadiness{store: historyStore})
 		if len(cfg.WatchRoots) != 0 {
-			producer, err := watch.NewProducer(watch.Registry{MachineID: "history-ragd", MaxBytes: watch.MaxSourceSnapshotBytes}, historyStore, cfg.WatchRoots, time.Second)
+			hostname, err := os.Hostname()
+			if err != nil {
+				return fmt.Errorf("resolve watcher machine identity: %w", err)
+			}
+			producer, err := newWatchProducer(watch.Registry{MachineID: hostname, MaxBytes: watch.MaxSourceSnapshotBytes}, historyStore, cfg.WatchRoots, time.Second, root)
 			if err != nil {
 				return fmt.Errorf("construct source watcher: %w", err)
 			}
