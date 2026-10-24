@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDiscoverIndexesFailsClosedAndClearsStaleReadiness(t *testing.T) {
@@ -77,4 +78,45 @@ func TestDiscoverIndexesFailsClosedAndClearsStaleReadiness(t *testing.T) {
 			t.Fatal("read-only discovery attempted a schema or data mutation")
 		}
 	})
+}
+
+func TestSummariesRefusesInvalidReadContractsWithoutWrites(t *testing.T) {
+	from := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, tc := range []struct {
+		name      string
+		ctx       context.Context
+		filter    Filter
+		limit     int
+		queryErr  error
+		wantQuery bool
+	}{
+		{name: "canceled context", ctx: canceled, limit: 1},
+		{name: "invalid limit", ctx: context.Background(), limit: 0},
+		{name: "inverted dates", ctx: context.Background(), filter: Filter{DateFrom: from.Add(time.Hour), DateTo: from}, limit: 1},
+		{name: "executor failure", ctx: context.Background(), limit: 1, queryErr: errors.New("summaries unavailable"), wantQuery: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &fakeExecutor{queryErr: tc.queryErr}
+			store, err := New(validConfig(EmbeddingRemoteModel), executor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Summaries(tc.ctx, tc.filter, tc.limit); err == nil {
+				t.Fatal("Summaries accepted an invalid read contract")
+			}
+			wantQueries := 0
+			if tc.wantQuery {
+				wantQueries = 1
+			}
+			if len(executor.queries) != wantQueries {
+				t.Fatalf("Summaries issued %d queries, want %d", len(executor.queries), wantQueries)
+			}
+			if len(executor.ddl)+len(executor.executions)+len(executor.mutations) != 0 {
+				t.Fatal("failed summary retrieval attempted a schema or data mutation")
+			}
+		})
+	}
 }
