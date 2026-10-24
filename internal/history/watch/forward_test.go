@@ -142,6 +142,38 @@ func TestForwardProducerBaselinesEveryExistingPathBeforeAnyUpload(t *testing.T) 
 	}
 }
 
+func TestForwardProducerAcceptsVariableHAPIProfileRootSet(t *testing.T) {
+	base := t.TempDir()
+	roots := make([]string, 0, 15)
+	for index := 0; index < 10; index++ {
+		root := filepath.Join(base, fmt.Sprintf("codex-profile-%02d", index), "sessions")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		roots = append(roots, root)
+	}
+	for index := 0; index < 5; index++ {
+		root := filepath.Join(base, fmt.Sprintf("claude-profile-%02d", index), "projects")
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		roots = append(roots, root)
+	}
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	producer, err := NewForwardProducer(Registry{MachineID: "hapi-worker", MaxBytes: MaxSourceSnapshotBytes}, sink, roots, time.Second, state)
+	if err != nil {
+		t.Fatalf("NewForwardProducer HAPI roots: %v", err)
+	}
+	t.Cleanup(func() { _ = producer.Close() })
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan HAPI roots: %v", err)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("empty HAPI roots uploaded content: %d batches", len(sink.chunks))
+	}
+}
+
 func TestForwardProducerPermanentlyExcludesExistingPathAcrossMutationReplacementAndRestart(t *testing.T) {
 	sourceRoot := t.TempDir()
 	path := filepath.Join(sourceRoot, "existing.jsonl")
