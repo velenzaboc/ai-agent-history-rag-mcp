@@ -33,12 +33,16 @@ func openForwardState(t *testing.T) (*durable.Root, string) {
 }
 
 func forwardTurn(session, marker string, timestamp time.Time) []byte {
+	return forwardTurnWithTimestamps(session, marker, timestamp, timestamp.Add(time.Second))
+}
+
+func forwardTurnWithTimestamps(session, marker string, userTimestamp, assistantTimestamp time.Time) []byte {
 	records := []map[string]any{
 		{
 			"type":      "user",
 			"uuid":      "user-" + marker,
 			"sessionId": session,
-			"timestamp": timestamp.UTC().Format(time.RFC3339Nano),
+			"timestamp": userTimestamp.UTC().Format(time.RFC3339Nano),
 			"message": map[string]any{
 				"role":    "user",
 				"content": "forward user " + marker,
@@ -48,7 +52,7 @@ func forwardTurn(session, marker string, timestamp time.Time) []byte {
 			"type":      "assistant",
 			"uuid":      "assistant-" + marker,
 			"sessionId": session,
-			"timestamp": timestamp.Add(time.Second).UTC().Format(time.RFC3339Nano),
+			"timestamp": assistantTimestamp.UTC().Format(time.RFC3339Nano),
 			"message": map[string]any{
 				"role":  "assistant",
 				"model": "fixture",
@@ -58,6 +62,53 @@ func forwardTurn(session, marker string, timestamp time.Time) []byte {
 			},
 		},
 	}
+	var payload []byte
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			panic(err)
+		}
+		payload = append(payload, encoded...)
+		payload = append(payload, '\n')
+	}
+	return payload
+}
+
+func codexForwardSession(session, marker string, headerTimestamp, userTimestamp, assistantTimestamp time.Time, includeUser bool) []byte {
+	records := []map[string]any{
+		{
+			"type":      "session_meta",
+			"timestamp": headerTimestamp.UTC().Format(time.RFC3339Nano),
+			"payload": map[string]any{
+				"id":  session,
+				"cwd": "/work/codex-forward",
+			},
+		},
+	}
+	if includeUser {
+		records = append(records, map[string]any{
+			"type":      "response_item",
+			"timestamp": userTimestamp.UTC().Format(time.RFC3339Nano),
+			"payload": map[string]any{
+				"type": "message",
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "codex user " + marker},
+				},
+			},
+		})
+	}
+	records = append(records, map[string]any{
+		"type":      "response_item",
+		"timestamp": assistantTimestamp.UTC().Format(time.RFC3339Nano),
+		"payload": map[string]any{
+			"type": "message",
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "output_text", "text": "codex assistant " + marker},
+			},
+		},
+	})
 	var payload []byte
 	for _, record := range records {
 		encoded, err := json.Marshal(record)
@@ -123,6 +174,13 @@ func TestForwardProducerBaselinesEveryExistingPathBeforeAnyUpload(t *testing.T) 
 
 	state, _ := openForwardState(t)
 	sink := &recordingSink{}
+	previousSnapshot := snapshotForwardSource
+	snapshotCalls := 0
+	snapshotForwardSource = func(*PinnedRoot, string, int64) (*Snapshot, error) {
+		snapshotCalls++
+		return nil, errors.New("baseline source content was opened")
+	}
+	t.Cleanup(func() { snapshotForwardSource = previousSnapshot })
 	producer, err := NewForwardProducer(Registry{MachineID: "cube", MaxBytes: MaxSourceSnapshotBytes}, sink, []string{sourceRoot}, time.Second, state)
 	if err != nil {
 		t.Fatalf("NewForwardProducer baseline: %v", err)
@@ -130,6 +188,9 @@ func TestForwardProducerBaselinesEveryExistingPathBeforeAnyUpload(t *testing.T) 
 	t.Cleanup(func() { _ = producer.Close() })
 	if len(sink.chunks) != 0 {
 		t.Fatalf("constructor uploaded baseline content: %d batches", len(sink.chunks))
+	}
+	if snapshotCalls != 0 {
+		t.Fatalf("constructor opened %d baseline sources", snapshotCalls)
 	}
 	if exists, err := state.Exists("forward.json"); err != nil || !exists {
 		t.Fatalf("durable baseline state = %t, %v", exists, err)
@@ -139,6 +200,9 @@ func TestForwardProducerBaselinesEveryExistingPathBeforeAnyUpload(t *testing.T) 
 	}
 	if len(sink.chunks) != 0 {
 		t.Fatalf("baseline scan uploaded existing content: %d batches", len(sink.chunks))
+	}
+	if snapshotCalls != 0 {
+		t.Fatalf("baseline scan opened %d excluded sources", snapshotCalls)
 	}
 }
 
@@ -250,11 +314,159 @@ func TestForwardProducerRefusesLateHistoricalAndUnknownTimestampSessions(t *test
 	}
 }
 
+func TestForwardProducerRefusesClaudeTurnWhoseRawUserTimestampPredatesCutoff(t *testing.T) {
+	sourceRoot := t.TempDir()
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	registry := Registry{MachineID: "cube", MaxBytes: MaxSourceSnapshotBytes}
+	producer, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sourceRoot, "cross-cutoff.jsonl")
+	writeForwardFile(t, path, forwardTurnWithTimestamps(
+		"cross-cutoff-session",
+		"cross-cutoff",
+		time.Now().Add(-24*time.Hour),
+		time.Now().Add(24*time.Hour),
+	))
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan cross-cutoff Claude turn: %v", err)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("cross-cutoff Claude turn uploaded from projected assistant timestamp: %d batches", len(sink.chunks))
+	}
+	writeForwardFile(t, path, forwardTurn("cross-cutoff-session", "all-new-replacement", time.Now().Add(48*time.Hour)))
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan replacement of refused Claude path: %v", err)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("refused Claude path became uploadable after replacement: %d batches", len(sink.chunks))
+	}
+	if err := producer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
+	if err != nil {
+		t.Fatalf("restart after cross-cutoff refusal: %v", err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	if err := restarted.Scan(context.Background()); err != nil {
+		t.Fatalf("restart scan after cross-cutoff refusal: %v", err)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("restart forgot refused Claude path: %d batches", len(sink.chunks))
+	}
+}
+
+func TestForwardProducerUsesRawCodexSessionMetadataForCutoff(t *testing.T) {
+	t.Run("old metadata header refuses new projected chunk permanently", func(t *testing.T) {
+		base := t.TempDir()
+		sourceRoot := filepath.Join(base, "codex", "sessions")
+		if err := os.MkdirAll(sourceRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		state, _ := openForwardState(t)
+		sink := &recordingSink{}
+		registry := Registry{MachineID: "hapi-codex", MaxBytes: MaxSourceSnapshotBytes}
+		producer, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(sourceRoot, "rollout.jsonl")
+		writeForwardFile(t, path, codexForwardSession(
+			"codex-old-header",
+			"old-header",
+			time.Now().Add(-24*time.Hour),
+			time.Now().Add(24*time.Hour),
+			time.Now().Add(24*time.Hour),
+			false,
+		))
+		if err := producer.Scan(context.Background()); err != nil {
+			t.Fatalf("Scan Codex old metadata header: %v", err)
+		}
+		if len(sink.chunks) != 0 {
+			t.Fatalf("Codex old metadata header was discarded before cutoff enforcement: %d batches", len(sink.chunks))
+		}
+		writeForwardFile(t, path, codexForwardSession(
+			"codex-old-header",
+			"all-new-replacement",
+			time.Now().Add(48*time.Hour),
+			time.Now().Add(48*time.Hour),
+			time.Now().Add(48*time.Hour),
+			true,
+		))
+		if err := producer.Scan(context.Background()); err != nil {
+			t.Fatalf("Scan replacement of refused Codex path: %v", err)
+		}
+		if len(sink.chunks) != 0 {
+			t.Fatalf("refused Codex path became uploadable after replacement: %d batches", len(sink.chunks))
+		}
+		if err := producer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		restarted, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
+		if err != nil {
+			t.Fatalf("restart after Codex metadata refusal: %v", err)
+		}
+		t.Cleanup(func() { _ = restarted.Close() })
+		if err := restarted.Scan(context.Background()); err != nil {
+			t.Fatalf("restart scan after Codex metadata refusal: %v", err)
+		}
+		if len(sink.chunks) != 0 {
+			t.Fatalf("restart forgot refused Codex path: %d batches", len(sink.chunks))
+		}
+	})
+
+	t.Run("new metadata header and conversation are captured", func(t *testing.T) {
+		base := t.TempDir()
+		sourceRoot := filepath.Join(base, "codex", "sessions")
+		if err := os.MkdirAll(sourceRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		state, _ := openForwardState(t)
+		sink := &recordingSink{}
+		registry := Registry{MachineID: "hapi-codex", MaxBytes: MaxSourceSnapshotBytes}
+		producer, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = producer.Close() })
+		future := time.Now().Add(24 * time.Hour)
+		writeForwardFile(t, filepath.Join(sourceRoot, "fresh.jsonl"), codexForwardSession(
+			"codex-fresh-session",
+			"fresh",
+			future,
+			future.Add(time.Second),
+			future.Add(2*time.Second),
+			true,
+		))
+		if err := producer.Scan(context.Background()); err != nil {
+			t.Fatalf("Scan fresh Codex session: %v", err)
+		}
+		if len(sink.chunks) != 1 || len(sink.chunks[0]) == 0 {
+			t.Fatalf("fresh Codex session batches = %#v", sink.chunks)
+		}
+		for _, chunk := range sink.chunks[0] {
+			if chunk.SessionID != "codex-fresh-session" || chunk.MachineID != registry.MachineID {
+				t.Fatalf("fresh Codex provenance = session:%q machine:%q", chunk.SessionID, chunk.MachineID)
+			}
+		}
+	})
+}
+
 func TestForwardProducerCapturesNewUpdatesDeduplicatesAndPersistsProgress(t *testing.T) {
 	sourceRoot := t.TempDir()
 	state, _ := openForwardState(t)
 	sink := &recordingSink{}
 	registry := Registry{MachineID: "cube-profile", MaxBytes: MaxSourceSnapshotBytes}
+	previousSnapshot := snapshotForwardSource
+	snapshotCalls := 0
+	snapshotForwardSource = func(root *PinnedRoot, path string, maxBytes int64) (*Snapshot, error) {
+		snapshotCalls++
+		return root.Snapshot(path, maxBytes)
+	}
+	t.Cleanup(func() { snapshotForwardSource = previousSnapshot })
 	producer, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +478,9 @@ func TestForwardProducerCapturesNewUpdatesDeduplicatesAndPersistsProgress(t *tes
 	}
 	if len(sink.chunks) != 1 || len(sink.chunks[0]) == 0 {
 		t.Fatalf("new session batches = %#v", sink.chunks)
+	}
+	if snapshotCalls == 0 {
+		t.Fatal("new source content bypassed snapshotForwardSource")
 	}
 	for _, chunk := range sink.chunks[0] {
 		if chunk.MachineID != registry.MachineID {
@@ -395,6 +610,42 @@ func TestForwardProducerRetriesAfterUploadSucceededButProgressPersistenceFailed(
 	}
 	if len(sink.chunks) != 2 {
 		t.Fatalf("unacknowledged upload was not retried: %d attempts", len(sink.chunks))
+	}
+}
+
+func TestForwardProducerRefusesWhenInitialBaselinePersistenceFails(t *testing.T) {
+	sourceRoot := t.TempDir()
+	writeForwardFile(t, filepath.Join(sourceRoot, "existing.jsonl"), []byte("baseline content must remain unread\n"))
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	wantErr := errors.New("initial forward state unavailable")
+	previousPersist := persistForwardState
+	persistCalls := 0
+	persistForwardState = func(gotRoot *durable.Root, name string, payload []byte) error {
+		persistCalls++
+		if gotRoot != state || name != "forward.json" || len(payload) == 0 {
+			t.Fatalf("initial persistence inputs = root:%v name:%q bytes:%d", gotRoot, name, len(payload))
+		}
+		return wantErr
+	}
+	t.Cleanup(func() { persistForwardState = previousPersist })
+
+	producer, err := NewForwardProducer(Registry{MachineID: "cube", MaxBytes: MaxSourceSnapshotBytes}, sink, []string{sourceRoot}, time.Second, state)
+	if producer != nil {
+		_ = producer.Close()
+		t.Fatal("NewForwardProducer returned a producer after initial state persistence failed")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("NewForwardProducer initial persistence error = %v, want %v", err, wantErr)
+	}
+	if persistCalls != 1 {
+		t.Fatalf("initial persistence calls = %d, want 1", persistCalls)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("constructor uploaded before baseline persistence: %d batches", len(sink.chunks))
+	}
+	if exists, existsErr := state.Exists("forward.json"); existsErr != nil || exists {
+		t.Fatalf("failed constructor left successful baseline state = %t, %v", exists, existsErr)
 	}
 }
 
