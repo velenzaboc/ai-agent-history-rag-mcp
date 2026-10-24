@@ -39,6 +39,7 @@ var (
 		return root.WriteAtomic(name, payload)
 	}
 	forwardSessionID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	forwardObjectID  = regexp.MustCompile(`^[0-9a-f]{16}:[0-9a-f]{16}$`)
 )
 
 type forwardRootState struct {
@@ -52,6 +53,7 @@ type forwardState struct {
 	Cutoff           time.Time          `json:"cutoff"`
 	Roots            []forwardRootState `json:"roots"`
 	ExcludedPaths    map[string]bool    `json:"excluded_paths"`
+	ExcludedObjects  map[string]bool    `json:"excluded_objects"`
 	ExcludedSessions map[string]bool    `json:"excluded_sessions"`
 	Progress         map[string]string  `json:"progress"`
 }
@@ -110,6 +112,7 @@ func NewForwardProducer(registry Registry, sink ChunkSink, paths []string, inter
 		Cutoff:           time.Now().UTC(),
 		Roots:            roots,
 		ExcludedPaths:    make(map[string]bool),
+		ExcludedObjects:  make(map[string]bool),
 		ExcludedSessions: make(map[string]bool),
 		Progress:         make(map[string]string),
 	}
@@ -159,7 +162,12 @@ func baselineForwardPaths(registry Registry, roots []*PinnedRoot, state *forward
 				return err
 			}
 			clean := filepath.Clean(path)
+			identity, err := root.forwardSourceIdentity(clean)
+			if err != nil {
+				return err
+			}
 			state.ExcludedPaths[clean] = true
+			state.ExcludedObjects[forwardIdentityKey(identity)] = true
 			if session := sessionIDFromPath(clean); session != "" {
 				state.ExcludedSessions[session] = true
 			}
@@ -177,6 +185,10 @@ func baselineForwardPaths(registry Registry, roots []*PinnedRoot, state *forward
 func sessionIDFromPath(path string) string {
 	match := forwardSessionID.FindString(filepath.Base(path))
 	return strings.ToLower(match)
+}
+
+func forwardIdentityKey(identity RootIdentity) string {
+	return fmt.Sprintf("%016x:%016x", identity.Volume, identity.Object)
 }
 
 func loadForwardState(root *durable.Root) (forwardState, error) {
@@ -261,7 +273,7 @@ func walkForwardJSON(decoder *json.Decoder) error {
 }
 
 func validateForwardState(state forwardState) error {
-	if state.Version != forwardStateVersion || state.Cutoff.IsZero() || len(state.Roots) == 0 || state.ExcludedPaths == nil || state.ExcludedSessions == nil || state.Progress == nil {
+	if state.Version != forwardStateVersion || state.Cutoff.IsZero() || len(state.Roots) == 0 || state.ExcludedPaths == nil || state.ExcludedObjects == nil || state.ExcludedSessions == nil || state.Progress == nil {
 		return errors.New("forward state is invalid")
 	}
 	for index, root := range state.Roots {
@@ -272,6 +284,11 @@ func validateForwardState(state forwardState) error {
 	for path, excluded := range state.ExcludedPaths {
 		if !excluded || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return errors.New("forward state exclusions are invalid")
+		}
+	}
+	for identity, excluded := range state.ExcludedObjects {
+		if !excluded || !forwardObjectID.MatchString(identity) {
+			return errors.New("forward state object exclusions are invalid")
 		}
 	}
 	for session, excluded := range state.ExcludedSessions {
@@ -303,6 +320,7 @@ func cloneForwardState(state forwardState) forwardState {
 	clone := state
 	clone.Roots = append([]forwardRootState(nil), state.Roots...)
 	clone.ExcludedPaths = cloneBoolMap(state.ExcludedPaths)
+	clone.ExcludedObjects = cloneBoolMap(state.ExcludedObjects)
 	clone.ExcludedSessions = cloneBoolMap(state.ExcludedSessions)
 	clone.Progress = make(map[string]string, len(state.Progress))
 	for key, value := range state.Progress {
@@ -349,11 +367,18 @@ func (p *Producer) scanForward(ctx context.Context, roots []*PinnedRoot, tracker
 			if tracker.state.ExcludedPaths[path] {
 				return nil
 			}
+			identity, err := root.forwardSourceIdentity(path)
+			if err != nil {
+				return err
+			}
+			if tracker.state.ExcludedObjects[forwardIdentityKey(identity)] {
+				return nil
+			}
 			seen++
 			if seen > MaxFilesPerScan {
 				return ErrScanLimit
 			}
-			return p.processForwardPath(ctx, root, path, kind, tracker)
+			return p.processForwardPath(ctx, root, path, kind, identity, tracker)
 		}); err != nil {
 			p.setReady(false)
 			return err
@@ -363,7 +388,7 @@ func (p *Producer) scanForward(ctx context.Context, roots []*PinnedRoot, tracker
 	return nil
 }
 
-func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, path string, kind SourceKind, tracker *forwardTracker) error {
+func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, path string, kind SourceKind, identity RootIdentity, tracker *forwardTracker) error {
 	snapshot, err := snapshotForwardSource(root, path, MaxSourceSnapshotBytes)
 	if err != nil {
 		return err
@@ -382,7 +407,7 @@ func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, pat
 		if closeErr := snapshot.Close(); closeErr != nil {
 			return closeErr
 		}
-		return refuseForwardPath(tracker, path, sessions)
+		return refuseForwardPath(tracker, path, identity, sessions)
 	}
 
 	chunks, dispatchErr := p.registry.Dispatch(kind, snapshot.Reader(), path)
@@ -398,7 +423,7 @@ func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, pat
 	}
 	for _, chunk := range chunks {
 		if chunk.Timestamp.IsZero() || chunk.Timestamp.Before(tracker.state.Cutoff) || tracker.state.ExcludedSessions[strings.ToLower(chunk.SessionID)] {
-			return refuseForwardPath(tracker, path, append(sessions, chunk.SessionID))
+			return refuseForwardPath(tracker, path, identity, append(sessions, chunk.SessionID))
 		}
 	}
 	if err := p.sink.Upsert(ctx, chunks); err != nil {
@@ -413,9 +438,10 @@ func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, pat
 	return nil
 }
 
-func refuseForwardPath(tracker *forwardTracker, path string, sessions []string) error {
+func refuseForwardPath(tracker *forwardTracker, path string, identity RootIdentity, sessions []string) error {
 	next := cloneForwardState(tracker.state)
 	next.ExcludedPaths[path] = true
+	next.ExcludedObjects[forwardIdentityKey(identity)] = true
 	for _, session := range sessions {
 		if session = strings.ToLower(strings.TrimSpace(session)); reliableForwardSession(session) {
 			next.ExcludedSessions[session] = true

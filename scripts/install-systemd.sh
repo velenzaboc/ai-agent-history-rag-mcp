@@ -74,7 +74,9 @@ GEMINI_ROOT="${CLAUDE_HISTORY_RAG_GEMINI_SESSIONS_PATH:-$HOME/.gemini/tmp}"
 ANTIGRAVITY_ROOT="${CLAUDE_HISTORY_RAG_ANTIGRAVITY_SESSIONS_PATH:-$HOME/.gemini/antigravity}"
 CHATGPT_ROOT="${CLAUDE_HISTORY_RAG_CHATGPT_EXPORTS_PATH:-$STATE_DIR/imports/chatgpt}"
 CLAUDE_APP_ROOT="${CLAUDE_HISTORY_RAG_CLAUDE_APP_EXPORTS_PATH:-$STATE_DIR/imports/claude-app}"
-WATCH_ROOTS=("$CLAUDE_ROOT" "$CODEX_ROOT" "$GEMINI_ROOT" "$ANTIGRAVITY_ROOT" "$CHATGPT_ROOT" "$CLAUDE_APP_ROOT")
+CLAUDE_PROFILE_ROOT="$HOME/.velenza/provider-profiles/claude"
+CODEX_PROFILE_ROOT="$HOME/.velenza/provider-profiles/codex"
+WATCH_ROOTS=("$CLAUDE_ROOT" "$CODEX_ROOT" "$GEMINI_ROOT" "$ANTIGRAVITY_ROOT" "$CHATGPT_ROOT" "$CLAUDE_APP_ROOT" "$CLAUDE_PROFILE_ROOT" "$CODEX_PROFILE_ROOT")
 for root in "${WATCH_ROOTS[@]}"; do
   require_absolute_clean "$root" "watch root"
 done
@@ -94,7 +96,7 @@ cat > "$CONFIG_PATH" <<EOF
   "state_dir": "$STATE_DIR",
   "listen": "127.0.0.1:4680",
   "container_mode": false,
-  "watch_roots": ["$CLAUDE_ROOT", "$CODEX_ROOT", "$GEMINI_ROOT", "$ANTIGRAVITY_ROOT", "$CHATGPT_ROOT", "$CLAUDE_APP_ROOT"],
+  "watch_roots": ["$CLAUDE_ROOT", "$CODEX_ROOT", "$GEMINI_ROOT", "$ANTIGRAVITY_ROOT", "$CHATGPT_ROOT", "$CLAUDE_APP_ROOT", "$CLAUDE_PROFILE_ROOT", "$CODEX_PROFILE_ROOT"],
   "pid_file": "$STATE_DIR/daemon.pid",
   "auth_state_file": "$STATE_DIR/auth.json",
   "auth_enabled": true,
