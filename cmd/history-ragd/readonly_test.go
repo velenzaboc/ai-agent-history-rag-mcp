@@ -78,7 +78,9 @@ func TestReadOnlyDaemonServesAuthenticatedRetrievalWithoutIngestion(t *testing.T
 	requested := useDaemonListener(t, listener)
 	done := make(chan error, 1)
 	go func() { done <- run([]string{"start", "--config", path}) }()
-	client := &http.Client{Timeout: 3 * time.Second}
+	transport := &http.Transport{}
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	t.Cleanup(transport.CloseIdleConnections)
 	healthRequest, err := http.NewRequest(http.MethodGet, "http://"+listener.Addr().String()+"/health", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -116,13 +118,17 @@ func TestReadOnlyDaemonServesAuthenticatedRetrievalWithoutIngestion(t *testing.T
 			t.Fatalf("search status = %d; want %d", response.StatusCode, want)
 		}
 	}
+	// The server owns a 15-second graceful-shutdown window. Close this test's
+	// idle keep-alive sockets before signaling, then allow that complete window
+	// plus bounded scheduler margin rather than racing it with a 3-second wait.
+	transport.CloseIdleConnections()
 	shutdown <- os.Interrupt
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("read-only shutdown timed out")
 	}
 	if backend.ready.Load() == 0 || backend.indexed.Load() != 1 || backend.searched.Load() != 1 || backend.writes.Load() != 0 || !backend.closed {

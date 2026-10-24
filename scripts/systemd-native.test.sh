@@ -49,8 +49,33 @@ TEST_LOG="$TMP_DIR/systemctl.log"
 mkdir -p "$TEST_HOME"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_BIN"
 chmod 700 "$TEST_BIN"
-# shellcheck disable=SC2016 # The fake receives SYSTEMCTL_LOG at execution time.
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "${SYSTEMCTL_LOG:?}"\n' > "$TEST_SYSTEMCTL"
+# The fake verifies the generated config and all watch directories already
+# exist at the exact service-start boundary, rather than inspecting installer
+# source literals.
+cat > "$TEST_SYSTEMCTL" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:?}"
+if [[ "$*" == *"enable --now ai-agent-history-rag"* ]]; then
+  jq -e --arg home "${EXPECTED_HOME:?}" '
+    .listen == "127.0.0.1:4680" and
+    .auth_enabled == true and
+    .watch_roots == [
+      ($home + "/.claude/projects"),
+      ($home + "/.codex/sessions"),
+      ($home + "/.gemini/tmp"),
+      ($home + "/.gemini/antigravity"),
+      ($home + "/.claude-history-rag/imports/chatgpt"),
+      ($home + "/.claude-history-rag/imports/claude-app"),
+      ($home + "/.velenza/provider-profiles/claude"),
+      ($home + "/.velenza/provider-profiles/codex")
+    ]
+  ' "${EXPECTED_CONFIG:?}" >/dev/null
+  while IFS= read -r root; do
+    [[ -d "$root" && ! -L "$root" ]]
+  done < <(jq -r '.watch_roots[]' "${EXPECTED_CONFIG:?}")
+fi
+EOF
 chmod 700 "$TEST_SYSTEMCTL"
 
 env \
@@ -58,6 +83,8 @@ env \
   XDG_CONFIG_HOME="$TEST_HOME/.config" \
   SYSTEMCTL_BIN="$TEST_SYSTEMCTL" \
   SYSTEMCTL_LOG="$TEST_LOG" \
+  EXPECTED_HOME="$TEST_HOME" \
+  EXPECTED_CONFIG="$TEST_HOME/.config/ai-agent-history-rag/history-ragd.json" \
   HISTORY_RAGD_BIN="$TEST_BIN" \
   GOOGLE_APPLICATION_CREDENTIALS= \
   CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE= \
@@ -92,12 +119,28 @@ require_literal "$INSTALLED_UNIT" "ExecStart=$TEST_BIN supervise --config $INSTA
 require_literal "$INSTALLED_UNIT" 'ReadWritePaths='"$TEST_HOME/.claude-history-rag" "installed unit state boundary"
 require_literal "$INSTALLED_CONFIG" '"listen": "127.0.0.1:4680"' "host loopback config"
 require_literal "$INSTALLED_CONFIG" '"auth_enabled": true' "authenticated config"
-require_literal "$INSTALLED_CONFIG" '"watch_roots": [' "six-source watcher config"
+jq -e --arg home "$TEST_HOME" '
+  .listen == "127.0.0.1:4680" and
+  .auth_enabled == true and
+  .watch_roots == [
+    ($home + "/.claude/projects"),
+    ($home + "/.codex/sessions"),
+    ($home + "/.gemini/tmp"),
+    ($home + "/.gemini/antigravity"),
+    ($home + "/.claude-history-rag/imports/chatgpt"),
+    ($home + "/.claude-history-rag/imports/claude-app"),
+    ($home + "/.velenza/provider-profiles/claude"),
+    ($home + "/.velenza/provider-profiles/codex")
+  ]
+' "$INSTALLED_CONFIG" >/dev/null || fail "generated config does not carry the exact eight protected loopback roots"
+while IFS= read -r root; do
+  [[ -d "$root" && ! -L "$root" ]] || fail "watch root was not created before service start: $root"
+done < <(jq -r '.watch_roots[]' "$INSTALLED_CONFIG")
 require_literal "$INSTALLED_ENV" 'CLAUDE_HISTORY_RAG_STORAGE_BACKEND=spanner' "Spanner-only environment"
 require_absent "$INSTALLED_ENV" 'GOOGLE_APPLICATION_CREDENTIALS|SPANNER_EMULATOR_HOST' "environment overrides"
 require_literal "$TEST_LOG" '--user daemon-reload' "systemctl reload"
 require_literal "$TEST_LOG" '--user enable --now ai-agent-history-rag' "systemctl enable"
-pass "installer writes protected loopback-only production unit and config"
+pass "installer writes protected loopback-only production unit with eight pre-created roots"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
   systemd-analyze verify "$INSTALLED_UNIT"
