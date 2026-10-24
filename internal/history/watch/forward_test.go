@@ -281,6 +281,73 @@ func TestForwardProducerPermanentlyExcludesExistingPathAcrossMutationReplacement
 	}
 }
 
+func TestForwardProducerExcludesRotatedBaselineSession(t *testing.T) {
+	const sessionUUID = "123e4567-e89b-12d3-a456-426614174000"
+	sourceRoot := t.TempDir()
+	originalPath := filepath.Join(sourceRoot, sessionUUID+".jsonl")
+	writeForwardFile(t, originalPath, []byte("baseline content must never be read\n"))
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	registry := Registry{MachineID: "cube", MaxBytes: MaxSourceSnapshotBytes}
+
+	previousSnapshot := snapshotForwardSource
+	baselineSnapshotCalls := 0
+	snapshotForwardSource = func(*PinnedRoot, string, int64) (*Snapshot, error) {
+		baselineSnapshotCalls++
+		return nil, errors.New("rotated baseline content was opened")
+	}
+	t.Cleanup(func() { snapshotForwardSource = previousSnapshot })
+	producer, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
+	if err != nil {
+		t.Fatalf("NewForwardProducer rotated baseline: %v", err)
+	}
+	if baselineSnapshotCalls != 0 {
+		t.Fatalf("constructor opened rotated baseline source %d times", baselineSnapshotCalls)
+	}
+	snapshotForwardSource = previousSnapshot
+
+	originalInfo, err := os.Stat(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedPath := filepath.Join(sourceRoot, "rotated", "continued.jsonl")
+	if err := os.MkdirAll(filepath.Dir(rotatedPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(originalPath, rotatedPath); err != nil {
+		t.Fatal(err)
+	}
+	writeForwardFile(t, rotatedPath, forwardTurn(sessionUUID, "rotated-fresh", time.Now().Add(24*time.Hour)))
+	rotatedInfo, err := os.Stat(rotatedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(originalInfo, rotatedInfo) {
+		t.Fatal("rotation fixture replaced the baseline file object")
+	}
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan rotated baseline session: %v", err)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("rotated baseline session uploaded as a new path: %d batches", len(sink.chunks))
+	}
+	if err := producer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := NewForwardProducer(registry, sink, []string{sourceRoot}, time.Second, state)
+	if err != nil {
+		t.Fatalf("restart after baseline rotation: %v", err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	if err := restarted.Scan(context.Background()); err != nil {
+		t.Fatalf("restart scan after baseline rotation: %v", err)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("restart forgot rotated baseline session: %d batches", len(sink.chunks))
+	}
+}
+
 func TestForwardProducerRefusesLateHistoricalAndUnknownTimestampSessions(t *testing.T) {
 	for name, initial := range map[string][]byte{
 		"mixed old session with new tail": append(
