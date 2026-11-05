@@ -49,6 +49,8 @@
     {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE", "required": true, "purpose": "Google credential source"},
     {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE", "required": true, "purpose": "Google credential profile"},
     {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY", "required": true, "purpose": "bound Google service account"},
+    {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY", "required": false, "purpose": "exact workload source service account"},
+    {"name": "CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE", "required": false, "purpose": "exact workload identity provider resource URI"},
     {"name": "CLAUDE_HISTORY_RAG_STORAGE_BACKEND", "required": true, "purpose": "storage backend"},
     {"name": "CLAUDE_HISTORY_RAG_SPANNER_PROJECT", "required": true, "purpose": "Spanner project"},
     {"name": "CLAUDE_HISTORY_RAG_SPANNER_INSTANCE", "required": true, "purpose": "Spanner instance"},

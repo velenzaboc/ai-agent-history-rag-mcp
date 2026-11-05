@@ -161,12 +161,12 @@ func expectEOF(decoder *json.Decoder) error {
 func (cfg *Config) validate() error {
 	wantListen := "127.0.0.1:4680"
 	if cfg.ReadOnly {
-		if cfg.ContainerMode || !cfg.AuthEnabled || len(cfg.WatchRoots) != 0 {
-			return errors.New("read-only mode requires authenticated host operation without watch roots")
+		if !cfg.AuthEnabled || len(cfg.WatchRoots) != 0 {
+			return errors.New("read-only mode requires authenticated operation without watch roots")
 		}
 		wantListen = "127.0.0.1:4681"
 	}
-	if cfg.ContainerMode {
+	if cfg.ContainerMode && !cfg.ReadOnly {
 		if !cfg.AuthEnabled {
 			return errors.New("container mode requires authentication")
 		}
@@ -179,13 +179,13 @@ func (cfg *Config) validate() error {
 	if err != nil || (port != "4680" && !(cfg.ReadOnly && port == "4681")) || net.ParseIP(host) == nil {
 		return errors.New("listen must be a fixed numeric endpoint")
 	}
-	if cfg.ContainerMode && !net.ParseIP(host).IsUnspecified() {
+	if cfg.ContainerMode && !cfg.ReadOnly && !net.ParseIP(host).IsUnspecified() {
 		return errors.New("container listen must be the fixed unspecified endpoint")
 	}
-	if !cfg.ContainerMode && !net.ParseIP(host).IsLoopback() {
+	if (!cfg.ContainerMode || cfg.ReadOnly) && !net.ParseIP(host).IsLoopback() {
 		return errors.New("host listen must be loopback")
 	}
-	if cfg.ContainerMode && len(cfg.WatchRoots) != 6 {
+	if cfg.ContainerMode && !cfg.ReadOnly && len(cfg.WatchRoots) != 6 {
 		return errors.New("container mode requires exactly six watch roots")
 	}
 	roots := make(map[string]struct{}, len(cfg.WatchRoots))
