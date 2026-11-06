@@ -213,15 +213,18 @@ The exact native contract and its bounded API surface are recorded in
 The explicit `workload_identity_federation` profile accepts the host's existing
 X.509 `external_account` carrier selected process-locally by
 `GOOGLE_APPLICATION_CREDENTIALS`. Set
-`CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY` to the exact source device identity,
-`CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY` to the distinct scoped search identity,
+`CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY` to this container's scoped search identity,
 and `CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE` to the exact provider resource URI.
-The carrier's STS endpoint and source-identity impersonation URL must be canonical
-Google mTLS endpoints. The certificate configuration, certificate and key must
+The carrier's STS endpoint and service impersonation URL must be canonical
+Google mTLS endpoints, with the carrier impersonation URL naming exactly the
+declared search identity. Leave `CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY`
+unset; this profile never mints a shared host token. The certificate
+configuration, certificate and key must
 be explicit owner-only regular files; executable, file-token and ambient
 certificate discovery are refused. The daemon uses the already-pinned modern
-Google auth SDK for X.509 federation, then impersonates the scoped target. A
-source token is never used for history/Vertex operations. Existing profiles
+Google auth SDK for direct X.509 federation into the scoped target. Mount only
+this container's own service carrier and certificate, with provider subject
+access granted only to its corresponding search identity. Existing profiles
 and local capture remain unchanged.
 
 A read-only container may set `container_mode:true`, `read_only:true`,

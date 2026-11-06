@@ -53,11 +53,10 @@ func TestNativeWorkloadValidationCommandUsesProductionBoundaryWithoutStartingDae
 		return write(name, data)
 	}
 	certConfig := jsonFile("certificate_config.json", map[string]any{"cert_configs": map[string]any{"workload": map[string]any{"cert_path": certPath, "key_path": keyPath}}})
-	base := "device-builder@verification-project.iam.gserviceaccount.com"
 	target := "history-reader@verification-project.iam.gserviceaccount.com"
 	audience := "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/verification-device/providers/device-certificate"
-	carrier := jsonFile("workload.json", map[string]any{"type": "external_account", "audience": audience, "subject_token_type": "urn:ietf:params:oauth:token-type:mtls", "token_url": "https://sts.mtls.googleapis.com/v1/token", "service_account_impersonation_url": "https://iamcredentials.mtls.googleapis.com/v1/projects/-/serviceAccounts/" + base + ":generateAccessToken", "credential_source": map[string]any{"certificate": map[string]any{"certificate_config_location": certConfig}}})
-	for key, value := range map[string]string{"GOOGLE_APPLICATION_CREDENTIALS": carrier, "CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT": "production", "CLAUDE_HISTORY_RAG_STORAGE_BACKEND": "spanner", "CLAUDE_HISTORY_RAG_SPANNER_PROJECT": "verification-project", "CLAUDE_HISTORY_RAG_SPANNER_INSTANCE": "verification-instance", "CLAUDE_HISTORY_RAG_SPANNER_DATABASE": "history-corpus", "CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE": "spanner", "CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID": "ConversationEmbeddingModel", "CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER": "vertex", "CLAUDE_HISTORY_RAG_EMBEDDING_MODEL": "gemini-embedding-001", "CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION": "3072", "CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST": "127.0.0.1", "CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT": "4681", "CLAUDE_HISTORY_RAG_READ_ONLY": "true", "CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE": "application_default", "CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE": "workload_identity_federation", "CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY": target, "CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY": base, "CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE": audience} {
+	carrier := jsonFile("workload.json", map[string]any{"type": "external_account", "audience": audience, "subject_token_type": "urn:ietf:params:oauth:token-type:mtls", "token_url": "https://sts.mtls.googleapis.com/v1/token", "service_account_impersonation_url": "https://iamcredentials.mtls.googleapis.com/v1/projects/-/serviceAccounts/" + target + ":generateAccessToken", "credential_source": map[string]any{"certificate": map[string]any{"certificate_config_location": certConfig}}})
+	for key, value := range map[string]string{"GOOGLE_APPLICATION_CREDENTIALS": carrier, "CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT": "production", "CLAUDE_HISTORY_RAG_STORAGE_BACKEND": "spanner", "CLAUDE_HISTORY_RAG_SPANNER_PROJECT": "verification-project", "CLAUDE_HISTORY_RAG_SPANNER_INSTANCE": "verification-instance", "CLAUDE_HISTORY_RAG_SPANNER_DATABASE": "history-corpus", "CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE": "spanner", "CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID": "ConversationEmbeddingModel", "CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER": "vertex", "CLAUDE_HISTORY_RAG_EMBEDDING_MODEL": "gemini-embedding-001", "CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION": "3072", "CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST": "127.0.0.1", "CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT": "4681", "CLAUDE_HISTORY_RAG_READ_ONLY": "true", "CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE": "application_default", "CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE": "workload_identity_federation", "CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY": target, "CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE": audience} {
 		t.Setenv(key, value)
 	}
 	if err := run([]string{"validate-workload-credentials"}); err != nil {
@@ -65,9 +64,9 @@ func TestNativeWorkloadValidationCommandUsesProductionBoundaryWithoutStartingDae
 	}
 	t.Setenv("CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY", target)
 	if err := run([]string{"validate-workload-credentials"}); err == nil {
-		t.Fatal("source equals target accepted")
+		t.Fatal("host base identity accepted")
 	}
-	t.Setenv("CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY", base)
+	t.Setenv("CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY", "")
 	t.Setenv("CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT", "4680")
 	if err := run([]string{"validate-workload-credentials"}); err == nil {
 		t.Fatal("readonly endpoint substitution accepted")

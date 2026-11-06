@@ -90,8 +90,9 @@ checks bounded configuration, authentication, source roots, watcher behavior,
 and readiness semantics.
 
 An explicitly configured `workload_identity_federation` profile adds
-certificate-sourced external accounts with exact source identity, target
-identity and provider audience binding. Its co-located native validator is the
+certificate-sourced external accounts with exact service identity and provider
+audience binding. It rejects a host base identity and obtains the declared
+service token directly. Its co-located native validator is the
 single implementation used by both daemon and MCP proxy. Read-only containers
 retain loopback 4681, authentication and zero watch roots; capture container
 mode keeps its established six-root contract. See the README's certificate

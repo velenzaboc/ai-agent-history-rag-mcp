@@ -101,23 +101,23 @@ func TestSpannerResourceNameAndIntegerReaderAreClosed(t *testing.T) {
 	}
 }
 
-func TestReadOnlyWorkloadSelectorBindsAudienceAndBothIdentities(t *testing.T) {
+func TestReadOnlyWorkloadSelectorBindsDirectServiceIdentityAndAudience(t *testing.T) {
 	env := validProductionEnvironment()
 	env["CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE"] = "workload_identity_federation"
-	env["CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY"] = "device-source@fixture-project.iam.gserviceaccount.com"
-	env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] = "//iam.googleapis.com/projects/719268921975/locations/global/workloadIdentityPools/arcserver3-device/providers/device-certificate"
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] = "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/history-service/providers/service-certificate"
 	env["CLAUDE_HISTORY_RAG_READ_ONLY"] = "true"
 	env["CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT"] = "4681"
 	cfg, err := LoadProduction(func(k string) string { return env[k] })
-	if err != nil || !cfg.ReadOnly || cfg.GoogleCredentials.CredentialsBaseIdentity != env["CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY"] || cfg.GoogleCredentials.CredentialsAudience != env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] {
+	if err != nil || !cfg.ReadOnly || cfg.GoogleCredentials.CredentialsBaseIdentity != "" || cfg.GoogleCredentials.CredentialsAudience != env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] {
 		t.Fatalf("workload config=%+v err=%v", cfg, err)
 	}
-	for _, key := range []string{"CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY", "CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"} {
-		old := env[key]
-		delete(env, key)
-		if _, err := LoadProduction(func(k string) string { return env[k] }); err == nil {
-			t.Fatalf("missing %s accepted", key)
-		}
-		env[key] = old
+	delete(env, "CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE")
+	if _, err := LoadProduction(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("missing audience accepted")
+	}
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] = cfg.GoogleCredentials.CredentialsAudience
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY"] = "host-controller@fixture-project.iam.gserviceaccount.com"
+	if _, err := LoadProduction(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("shared host base accepted")
 	}
 }
