@@ -30,6 +30,7 @@ const (
 	CredentialsProfileImpersonatedServiceAccount       = "impersonated_service_account"
 	CredentialsProfileAttachedServiceAccount           = "attached_service_account"
 	CredentialsProfileDeviceServiceAccount             = "device_service_account"
+	CredentialsProfileWorkloadIdentityFederation       = "workload_identity_federation"
 	CloudPlatformScope                                 = "https://www.googleapis.com/auth/cloud-platform"
 	maxCredentialConfigurationBytes              int64 = 1 << 20
 )
@@ -110,15 +111,22 @@ var (
 // Selector is the one credential selector shared by every Google client in a
 // process. It intentionally exposes no credential-file arm.
 type Selector struct {
-	CredentialsSource   string
-	CredentialsProfile  string
-	CredentialsIdentity string
+	// CredentialsFile is reserved and rejected; workload selection is process-local.
+	CredentialsFile         string
+	CredentialsSource       string
+	CredentialsProfile      string
+	CredentialsIdentity     string
+	CredentialsBaseIdentity string
+	CredentialsAudience     string
 }
 
 // Validate closes the selector before any Google client is constructed.
 func (s Selector) Validate(label string) error {
 	if label == "" {
 		label = "google_credentials"
+	}
+	if s.CredentialsFile != "" {
+		return fmt.Errorf("%s: credentials_file is forbidden", label)
 	}
 	if s.CredentialsSource == "" {
 		return fmt.Errorf("%s: credentials_source=%s is required", label, CredentialsSourceApplicationDefault)
@@ -129,7 +137,12 @@ func (s Selector) Validate(label string) error {
 	if !serviceAccountEmailPattern.MatchString(s.CredentialsIdentity) {
 		return fmt.Errorf("%s: credentials_identity %q is not a canonical user-managed service-account email", label, s.CredentialsIdentity)
 	}
+	if s.CredentialsProfile != CredentialsProfileWorkloadIdentityFederation && (s.CredentialsAudience != "" || s.CredentialsBaseIdentity != "") {
+		return fmt.Errorf("%s: workload fields require workload federation profile", label)
+	}
 	switch s.CredentialsProfile {
+	case CredentialsProfileWorkloadIdentityFederation:
+		return s.validateWorkloadIdentitySelector()
 	case CredentialsProfileImpersonatedServiceAccount, CredentialsProfileAttachedServiceAccount, CredentialsProfileDeviceServiceAccount:
 		return nil
 	case "":
@@ -179,6 +192,8 @@ func (s Selector) tokenSource(ctx context.Context, detachRefresh bool, scopes ..
 		return nil, fmt.Errorf("google_credentials: scopes must contain only %q", CloudPlatformScope)
 	}
 	switch s.CredentialsProfile {
+	case CredentialsProfileWorkloadIdentityFederation:
+		return s.workloadIdentityTokenSource(ctx, scopes, detachRefresh)
 	case CredentialsProfileImpersonatedServiceAccount:
 		return s.impersonatedTokenSource(ctx, scopes, detachRefresh)
 	case CredentialsProfileAttachedServiceAccount:

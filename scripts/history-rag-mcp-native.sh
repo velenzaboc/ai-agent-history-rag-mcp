@@ -190,6 +190,17 @@ validate_production_contract() {
   validate_source_paths
 
   case "${CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE-}" in
+    workload_identity_federation)
+      local validator
+      validator="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/history-ragd"
+      [[ -f "$validator" && ! -L "$validator" && -x "$validator" ]] || contract_fail "co-located native workload credential validator is required"
+      local validator_mode validator_owner
+      validator_mode="$(file_mode "$validator")" || contract_fail "workload validator mode unavailable"
+      validator_owner="$(file_owner "$validator")" || contract_fail "workload validator owner unavailable"
+      [[ "$validator_mode" =~ ^[0-7]{3,4}$ && "$validator_owner" == "$(id -u)" ]] || contract_fail "workload validator owner invalid"
+      (( (8#$validator_mode & 022) == 0 )) || contract_fail "workload validator must not be writable by other users"
+      "$validator" validate-workload-credentials >/dev/null 2>&1 || contract_fail "workload credential validation failed"
+      ;;
     device_service_account)
       [[ -z "${GOOGLE_APPLICATION_CREDENTIALS-}" && -z "${CLOUDSDK_CONFIG-}" ]] || contract_fail "device_service_account uses only the well-known device carrier"
       local device_adc="$HOME/.config/gcloud/application_default_credentials.json"
@@ -567,6 +578,7 @@ projected_environment() {
     HOME PATH CLOUDSDK_CONFIG GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS
     CLAUDE_HISTORY_RAG_READ_ONLY CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE
     CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY
+    CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE
     CLAUDE_HISTORY_RAG_STORAGE_BACKEND CLAUDE_HISTORY_RAG_SPANNER_PROJECT
     CLAUDE_HISTORY_RAG_SPANNER_INSTANCE CLAUDE_HISTORY_RAG_SPANNER_DATABASE
     CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID
@@ -582,7 +594,7 @@ projected_environment() {
   for key in "${keys[@]}"; do
     value="${!key-}"
     [[ -n "$value" ]] || continue
-    if [[ "$key" == "GOOGLE_APPLICATION_CREDENTIALS" && "$CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE" != "impersonated_service_account" ]]; then
+    if [[ "$key" == "GOOGLE_APPLICATION_CREDENTIALS" && "$CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE" != "impersonated_service_account" && "$CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE" != "workload_identity_federation" ]]; then
       continue
     fi
     output="$(jq -cn --argjson current "$output" --arg key "$key" --arg value "$value" '$current + {($key):$value}')"

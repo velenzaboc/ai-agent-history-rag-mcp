@@ -100,3 +100,24 @@ func TestSpannerResourceNameAndIntegerReaderAreClosed(t *testing.T) {
 		t.Fatal("LoadProduction accepted nil environment reader")
 	}
 }
+
+func TestReadOnlyWorkloadSelectorBindsDirectServiceIdentityAndAudience(t *testing.T) {
+	env := validProductionEnvironment()
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE"] = "workload_identity_federation"
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] = "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/history-service/providers/service-certificate"
+	env["CLAUDE_HISTORY_RAG_READ_ONLY"] = "true"
+	env["CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT"] = "4681"
+	cfg, err := LoadProduction(func(k string) string { return env[k] })
+	if err != nil || !cfg.ReadOnly || cfg.GoogleCredentials.CredentialsBaseIdentity != "" || cfg.GoogleCredentials.CredentialsAudience != env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] {
+		t.Fatalf("workload config=%+v err=%v", cfg, err)
+	}
+	delete(env, "CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE")
+	if _, err := LoadProduction(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("missing audience accepted")
+	}
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE"] = cfg.GoogleCredentials.CredentialsAudience
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY"] = "host-controller@fixture-project.iam.gserviceaccount.com"
+	if _, err := LoadProduction(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("shared host base accepted")
+	}
+}

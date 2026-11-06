@@ -96,6 +96,14 @@ func daemonExitCode(operation func([]string) error, arguments []string) int {
 }
 
 func run(arguments []string) error {
+	if len(arguments) == 1 && arguments[0] == "validate-workload-credentials" {
+		cfg, err := runtimeconfig.LoadProduction(os.Getenv)
+		if err != nil {
+			return err
+		}
+		_, err = cfg.GoogleCredentials.ValidateWorkloadIdentityConfiguration()
+		return err
+	}
 	if len(arguments) == 0 {
 		return errors.New("command required")
 	}

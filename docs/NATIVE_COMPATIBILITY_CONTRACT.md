@@ -17,7 +17,7 @@ proxy. It has one production storage path: Cloud Spanner with the registered
 
 The process requires the exact environment enumerated in the root README:
 production contract, Spanner target, fixed embedding configuration, loopback
-host/port, impersonated ADC selector, service-account identity, and bearer
+host/port, explicit credential profile, service-account identity, and bearer
 secret. The process refuses missing, unknown, or substituted values. It also
 refuses credential-file, emulator, and ambient Cloud SDK overrides.
 
@@ -88,3 +88,12 @@ example container configuration against this contract. Platform-specific tests
 check generated systemd, launchd, and Windows task artifacts. The Go test suite
 checks bounded configuration, authentication, source roots, watcher behavior,
 and readiness semantics.
+
+An explicitly configured `workload_identity_federation` profile adds
+certificate-sourced external accounts with exact service identity and provider
+audience binding. It rejects a host base identity and obtains the declared
+service token directly. Its co-located native validator is the
+single implementation used by both daemon and MCP proxy. Read-only containers
+retain loopback 4681, authentication and zero watch roots; capture container
+mode keeps its established six-root contract. See the README's certificate
+workload section for deployment inputs and nonclaims.

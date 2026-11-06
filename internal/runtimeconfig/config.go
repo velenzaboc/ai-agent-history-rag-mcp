@@ -81,9 +81,11 @@ func LoadProduction(getenv func(string) string) (Config, error) {
 		StatusServerPort:        statusPort,
 		ReadOnly:                getenv("CLAUDE_HISTORY_RAG_READ_ONLY") == "true",
 		GoogleCredentials: gcpauth.Selector{
-			CredentialsSource:   strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE")),
-			CredentialsProfile:  strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE")),
-			CredentialsIdentity: strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY")),
+			CredentialsSource:       strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE")),
+			CredentialsProfile:      strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE")),
+			CredentialsIdentity:     strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY")),
+			CredentialsBaseIdentity: strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY")),
+			CredentialsAudience:     strings.TrimSpace(getenv("CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE")),
 		},
 	}
 	if raw := getenv("CLAUDE_HISTORY_RAG_READ_ONLY"); raw != "" && raw != "true" && raw != "false" {

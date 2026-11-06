@@ -207,3 +207,46 @@ go test ./...
 
 The exact native contract and its bounded API surface are recorded in
 [docs/NATIVE_COMPATIBILITY_CONTRACT.md](docs/NATIVE_COMPATIBILITY_CONTRACT.md).
+
+### Certificate workload federation for a central search container
+
+The explicit `workload_identity_federation` profile accepts the host's existing
+X.509 `external_account` carrier selected process-locally by
+`GOOGLE_APPLICATION_CREDENTIALS`. Set
+`CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY` to this container's scoped search identity,
+and `CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE` to the exact provider resource URI.
+The carrier's STS endpoint and service impersonation URL must be canonical
+Google mTLS endpoints, with the carrier impersonation URL naming exactly the
+declared search identity. Leave `CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY`
+unset; this profile never mints a shared host token. The certificate
+configuration, certificate and key must
+be explicit owner-only regular files; executable, file-token and ambient
+certificate discovery are refused. The daemon uses the already-pinned modern
+Google auth SDK for direct X.509 federation into the scoped target. Mount only
+this container's own service carrier and certificate, with provider subject
+access granted only to its corresponding search identity. Existing profiles
+and local capture remain unchanged.
+
+A read-only container may set `container_mode:true`, `read_only:true`,
+`listen:"127.0.0.1:4681"`, `auth_enabled:true` and an empty `watch_roots` list.
+It starts no watcher and requires an existing corpus. Preserve workstation
+capture services and their forward-only cutoffs. Deploy the native daemon and
+`scripts/history-rag-mcp-native.sh` side by side with bash, curl and jq. The proxy
+calls the co-located daemon's `validate-workload-credentials` command before
+serving MCP, sharing the Go credential validator without a shell credential
+parser. This command validates local configuration only; it neither exchanges
+tokens nor proves backend access. Apply the same environment to the daemon and
+proxy. Keep runtime credential mounts read-only and PSK state private; never
+embed credentials or PSKs in an image.
+
+### Verification and delivery
+
+Run `scripts/verify-locally.sh` on arcserver3 through
+`python3 /home/lab/Meridian/bin/velenza-preci.py --cwd <unique-run-checkout> -- bash scripts/verify-locally.sh`.
+Use an owned NVMe workspace and caches, preserve exact-revision output, and
+clean the run's own artifacts after collecting evidence. This replaces the
+automatic CI test workflow. Tests and coverage are never dispatched to CI;
+CI is reserved for an explicitly requested deployment. Independent acceptance
+and protected pull-request provenance remain required. Native macOS service
+manager exercise remains a separately recorded platform check; this command
+makes no claim to run a macOS daemon on Linux.

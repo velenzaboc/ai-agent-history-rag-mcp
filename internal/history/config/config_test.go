@@ -230,3 +230,23 @@ func TestOwnerOnlyConfigFileAndLinkChecks(t *testing.T) {
 		t.Fatal("requireSingleLink accepted a missing path")
 	}
 }
+
+func TestReadOnlyContainerKeepsLoopbackAuthenticationAndNoWatcher(t *testing.T) {
+	path, body := validConfig(t)
+	readonly := strings.Replace(body, `"listen":"127.0.0.1:4680"`, `"listen":"127.0.0.1:4681","read_only":true,"container_mode":true`, 1)
+	if err := os.WriteFile(path, []byte(readonly), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || !cfg.ReadOnly || !cfg.ContainerMode || len(cfg.WatchRoots) != 0 || cfg.Listen != "127.0.0.1:4681" {
+		t.Fatalf("read-only container=%+v err=%v", cfg, err)
+	}
+	for _, bad := range []string{strings.Replace(readonly, "127.0.0.1:4681", "0.0.0.0:4681", 1), strings.Replace(readonly, `"auth_enabled":true`, `"auth_enabled":false`, 1), strings.Replace(readonly, `"read_only":true`, `"read_only":true,"watch_roots":["/data/sources/claude"]`, 1)} {
+		if err := os.WriteFile(path, []byte(bad), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatal("unsafe read-only container accepted")
+		}
+	}
+}
