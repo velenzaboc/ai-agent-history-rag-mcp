@@ -1,6 +1,6 @@
 # Deployment-only automation
 
-Verification runs on arcserver3 under the native resource guard before delivery.
+Verification runs on the designated verification host under the native resource guard before delivery.
 There are no automatic CI tests in this repository. The removed ci.yml test
 workflow is replaced by scripts/verify-locally.sh, which runs the executable
 checks directly. A green fabricated/skipped CI job is not a replacement.
