@@ -137,6 +137,9 @@ func (c Config) validate() error {
 	if c.StatusServerPort != wantPort {
 		return fmt.Errorf("history_rag_runtime: status_server_port=%d expected %d", c.StatusServerPort, wantPort)
 	}
+	if c.ReadOnly && c.GoogleCredentials.CredentialsBaseIdentity != "" {
+		return fmt.Errorf("history_rag_runtime: read_only workload credentials must not set credentials_base_identity")
+	}
 	if err := c.GoogleCredentials.Validate("history_rag_google_credentials"); err != nil {
 		return err
 	}

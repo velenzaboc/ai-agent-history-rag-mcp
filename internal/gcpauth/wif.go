@@ -9,21 +9,35 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/credentials"
 	"golang.org/x/oauth2"
 )
 
-var workloadAudiencePattern = regexp.MustCompile(`^//iam\.googleapis\.com/projects/[1-9][0-9]*/locations/global/workloadIdentityPools/[a-z][a-z0-9-]{2,31}/providers/[a-z][a-z0-9-]{2,31}$`)
+const workloadTokenExchangeTimeout = 30 * time.Second
+
+var (
+	workloadAudiencePattern        = regexp.MustCompile(`^//iam\.googleapis\.com/projects/[1-9][0-9]*/locations/global/workloadIdentityPools/[a-z][a-z0-9-]{2,31}/providers/[a-z][a-z0-9-]{2,31}$`)
+	workloadIAMCredentialsEndpoint = "https://iamcredentials.googleapis.com"
+)
 
 func (s Selector) validateWorkloadIdentitySelector() error {
-	if s.CredentialsProfile != CredentialsProfileWorkloadIdentityFederation || s.CredentialsSource != CredentialsSourceApplicationDefault || s.CredentialsFile != "" || !serviceAccountEmailPattern.MatchString(s.CredentialsIdentity) || s.CredentialsBaseIdentity != "" || !workloadAudiencePattern.MatchString(s.CredentialsAudience) {
-		return fmt.Errorf("google_credentials: direct workload federation requires an exact audience and scoped identity without a base identity")
+	if s.CredentialsProfile != CredentialsProfileWorkloadIdentityFederation || s.CredentialsSource != CredentialsSourceApplicationDefault || s.CredentialsFile != "" || !serviceAccountEmailPattern.MatchString(s.CredentialsIdentity) || !workloadAudiencePattern.MatchString(s.CredentialsAudience) {
+		return fmt.Errorf("google_credentials: workload federation requires an exact audience and scoped identity")
+	}
+	if base := strings.TrimSpace(s.CredentialsBaseIdentity); base != "" {
+		if !serviceAccountEmailPattern.MatchString(base) || strings.EqualFold(base, strings.TrimSpace(s.CredentialsIdentity)) {
+			return fmt.Errorf("google_credentials: workload base identity must be a distinct canonical service-account email")
+		}
 	}
 	return nil
 }
@@ -38,15 +52,19 @@ type workloadCarrier struct {
 	QuotaProject     string `json:"quota_project_id,omitempty"`
 	CredentialSource struct {
 		Certificate struct {
-			Config string `json:"certificate_config_location"`
+			Config         string `json:"certificate_config_location"`
+			TrustChainPath string `json:"trust_chain_path,omitempty"`
 		} `json:"certificate"`
 	} `json:"credential_source"`
 }
 type workloadCertificateConfiguration struct {
-	CertConfigs struct {
+	Version        int    `json:"version,omitempty"`
+	TrustChainPath string `json:"trust_chain_path,omitempty"`
+	CertConfigs    struct {
 		Workload struct {
-			Cert string `json:"cert_path"`
-			Key  string `json:"key_path"`
+			Cert           string `json:"cert_path"`
+			Key            string `json:"key_path"`
+			TrustChainPath string `json:"trust_chain_path,omitempty"`
 		} `json:"workload"`
 	} `json:"cert_configs"`
 }
@@ -90,11 +108,15 @@ func (s Selector) ValidateWorkloadIdentityConfiguration() ([]byte, error) {
 	if err := decodeWorkloadJSON(raw, &carrier); err != nil {
 		return nil, err
 	}
-	expectedURL := "https://iamcredentials.mtls.googleapis.com/v1/projects/-/serviceAccounts/" + s.CredentialsIdentity + ":generateAccessToken"
+	carrierIdentity := strings.TrimSpace(s.CredentialsBaseIdentity)
+	if carrierIdentity == "" {
+		carrierIdentity = strings.TrimSpace(s.CredentialsIdentity)
+	}
+	expectedURL := "https://iamcredentials.mtls.googleapis.com/v1/projects/-/serviceAccounts/" + carrierIdentity + ":generateAccessToken"
 	if carrier.Type != "external_account" || carrier.Audience != s.CredentialsAudience || carrier.SubjectTokenType != "urn:ietf:params:oauth:token-type:mtls" || carrier.TokenURL != "https://sts.mtls.googleapis.com/v1/token" || carrier.ImpersonationURL != expectedURL || (carrier.UniverseDomain != "" && carrier.UniverseDomain != "googleapis.com") {
 		return nil, fmt.Errorf("google_credentials: workload service identity, audience or endpoint does not match")
 	}
-	if carrier.QuotaProject != "" && carrier.QuotaProject != serviceAccountProject(s.CredentialsIdentity) {
+	if carrier.QuotaProject != "" && carrier.QuotaProject != serviceAccountProject(carrierIdentity) {
 		return nil, fmt.Errorf("google_credentials: workload quota project does not match")
 	}
 	certConfig := carrier.CredentialSource.Certificate.Config
@@ -138,9 +160,22 @@ func (s Selector) workloadIdentityTokenSource(ctx context.Context, scopes []stri
 		return nil, fmt.Errorf("google_credentials: workload credential construction failed")
 	}
 	if detach {
-		ctx = context.Background()
+		ctx = context.WithoutCancel(ctx)
 	}
-	return &workloadOAuthTokenSource{ctx: ctx, provider: source}, nil
+	hop1 := &workloadOAuthTokenSource{ctx: ctx, provider: source}
+	if strings.TrimSpace(s.CredentialsBaseIdentity) == "" {
+		return hop1, nil
+	}
+	targetIdentity := strings.TrimSpace(s.CredentialsIdentity)
+	hop2 := &workloadImpersonatedTokenSource{
+		ctx:            ctx,
+		base:           hop1,
+		targetIdentity: targetIdentity,
+		quotaProject:   serviceAccountProject(targetIdentity),
+		scopes:         append([]string(nil), scopes...),
+		client:         &http.Client{Timeout: workloadTokenExchangeTimeout},
+	}
+	return oauth2.ReuseTokenSource(nil, hop2), nil
 }
 
 type workloadOAuthTokenSource struct {
@@ -149,7 +184,9 @@ type workloadOAuthTokenSource struct {
 }
 
 func (s *workloadOAuthTokenSource) Token() (*oauth2.Token, error) {
-	t, err := s.provider.Token(s.ctx)
+	callCtx, cancel := context.WithTimeout(s.ctx, workloadTokenExchangeTimeout)
+	defer cancel()
+	t, err := s.provider.Token(callCtx)
 	if err != nil {
 		return nil, fmt.Errorf("google_credentials: workload token exchange failed")
 	}
@@ -157,6 +194,61 @@ func (s *workloadOAuthTokenSource) Token() (*oauth2.Token, error) {
 		return nil, fmt.Errorf("google_credentials: workload exchange returned no token")
 	}
 	return &oauth2.Token{AccessToken: t.Value, TokenType: t.Type, Expiry: t.Expiry}, nil
+}
+
+type workloadImpersonatedTokenSource struct {
+	ctx            context.Context
+	base           oauth2.TokenSource
+	targetIdentity string
+	quotaProject   string
+	scopes         []string
+	client         *http.Client
+}
+
+func (s *workloadImpersonatedTokenSource) Token() (*oauth2.Token, error) {
+	baseToken, err := s.base.Token()
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(struct {
+		Scope []string `json:"scope"`
+	}{Scope: s.scopes})
+	if err != nil {
+		return nil, fmt.Errorf("google_credentials: encode target impersonation request")
+	}
+	callCtx, cancel := context.WithTimeout(s.ctx, workloadTokenExchangeTimeout)
+	defer cancel()
+	endpoint := strings.TrimRight(workloadIAMCredentialsEndpoint, "/") + "/v1/projects/-/serviceAccounts/" + url.PathEscape(s.targetIdentity) + ":generateAccessToken"
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("google_credentials: build target impersonation request")
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(baseToken.AccessToken))
+	req.Header.Set("Content-Type", "application/json")
+	if s.quotaProject != "" {
+		req.Header.Set("x-goog-user-project", s.quotaProject)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("google_credentials: workload target impersonation failed")
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxCredentialConfigurationBytes))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("google_credentials: workload target impersonation rejected")
+	}
+	var tokenResp struct {
+		AccessToken string `json:"accessToken"`
+		ExpireTime  string `json:"expireTime"`
+	}
+	if err := decodeWorkloadJSON(raw, &tokenResp); err != nil {
+		return nil, fmt.Errorf("google_credentials: invalid workload target token response")
+	}
+	expiry, err := time.Parse(time.RFC3339Nano, tokenResp.ExpireTime)
+	if err != nil || strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return nil, fmt.Errorf("google_credentials: incomplete workload target token response")
+	}
+	return &oauth2.Token{AccessToken: tokenResp.AccessToken, TokenType: "Bearer", Expiry: expiry}, nil
 }
 
 // The explicit certificate configuration is the sole mTLS credential input.

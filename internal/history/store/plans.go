@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var allColumns = []string{
@@ -20,7 +21,11 @@ var columnsWithoutVector = []string{
 	"SourceFile", "SourceLine", "ParentChunkId", "ChildChunkIds", "MachineId",
 }
 
-const maxQueryTextBytes = 16_384
+const (
+	maxQueryTextBytes      = 16_384
+	MaxChunkContentBytes   = 2 << 20
+	DefaultChunkSplitBytes = 32 << 10
+)
 
 func BuildInitializationDDL(config Config) ([]DDLStatement, error) {
 	if err := config.Validate(); err != nil {
@@ -75,35 +80,43 @@ WHERE Vector IS NOT NULL
 OPTIONS (distance_type = 'COSINE', tree_depth = 2, num_leaves = %d)`, config.VectorIndexLeaves), AlreadyExistsOK: true}, nil
 }
 
-func BuildUpsertPlan(config Config, chunks []Chunk) (UpsertPlan, error) {
-	if err := config.Validate(); err != nil {
-		return UpsertPlan{}, err
-	}
+func validateUpsertChunks(config Config, chunks []Chunk) (int, int, error) {
 	if len(chunks) == 0 {
-		return UpsertPlan{}, fmt.Errorf("upsert batch must not be empty")
-	}
-	if len(chunks) > 500 {
-		return UpsertPlan{}, fmt.Errorf("upsert batch exceeds 500 chunks")
+		return 0, 0, fmt.Errorf("upsert batch must not be empty")
 	}
 	embedded, unembedded := 0, 0
 	for index := range chunks {
 		if err := validateChunk(chunks[index]); err != nil {
-			return UpsertPlan{}, fmt.Errorf("chunk %d: %w", index, err)
+			return 0, 0, fmt.Errorf("chunk %d: %w", index, err)
 		}
 		if config.EmbeddingStrategy == EmbeddingDeferred && len(chunks[index].Vector) == 0 && !hasLowerHexShardPrefix(chunks[index].ID) {
-			return UpsertPlan{}, fmt.Errorf("chunk %d: deferred id must begin with two lowercase hexadecimal characters", index)
+			return 0, 0, fmt.Errorf("chunk %d: deferred id must begin with two lowercase hexadecimal characters", index)
 		}
 		if len(chunks[index].Vector) == 0 {
 			unembedded++
 		} else {
 			embedded++
 			if err := validateVector(chunks[index].Vector); err != nil {
-				return UpsertPlan{}, fmt.Errorf("chunk %q: %w", chunks[index].ID, err)
+				return 0, 0, fmt.Errorf("chunk %q: %w", chunks[index].ID, err)
 			}
 		}
 	}
 	if embedded != 0 && unembedded != 0 {
-		return UpsertPlan{}, fmt.Errorf("cannot mix embedded and unembedded chunks in one batch")
+		return 0, 0, fmt.Errorf("cannot mix embedded and unembedded chunks in one batch")
+	}
+	return embedded, unembedded, nil
+}
+
+func BuildUpsertPlan(config Config, chunks []Chunk) (UpsertPlan, error) {
+	if err := config.Validate(); err != nil {
+		return UpsertPlan{}, err
+	}
+	if len(chunks) > 500 {
+		return UpsertPlan{}, fmt.Errorf("upsert batch exceeds 500 chunks")
+	}
+	embedded, _, err := validateUpsertChunks(config, chunks)
+	if err != nil {
+		return UpsertPlan{}, err
 	}
 	if embedded != 0 {
 		mutation := Mutation{Table: TableName, Columns: append([]string(nil), allColumns...)}
@@ -442,7 +455,7 @@ func validateChunk(chunk Chunk) error {
 		value   string
 		maximum int
 	}{
-		{"id", chunk.ID, 64}, {"content", chunk.Content, 8 << 20},
+		{"id", chunk.ID, 64}, {"content", chunk.Content, MaxChunkContentBytes},
 		{"chunk_type", chunk.ChunkType, 32}, {"session_id", chunk.SessionID, 128},
 		{"project_path", chunk.ProjectPath, 8192}, {"project_name", chunk.ProjectName, 256},
 		{"source_file", chunk.SourceFile, 8192},
@@ -632,6 +645,32 @@ func optionalRowString(value any, name string) (string, error) {
 		return "", fmt.Errorf("%s is neither string nor NULL", name)
 	}
 	return converted, nil
+}
+
+func SplitChunkContent(content string, maxBytes int) []string {
+	if maxBytes <= 0 || maxBytes > DefaultChunkSplitBytes {
+		maxBytes = DefaultChunkSplitBytes
+	}
+	if len(content) <= maxBytes {
+		return []string{content}
+	}
+	var parts []string
+	for len(content) > 0 {
+		if len(content) <= maxBytes {
+			parts = append(parts, content)
+			break
+		}
+		cut := maxBytes
+		for cut > 0 && !utf8.RuneStart(content[cut]) {
+			cut--
+		}
+		if cut == 0 {
+			_, cut = utf8.DecodeRuneInString(content)
+		}
+		parts = append(parts, content[:cut])
+		content = content[cut:]
+	}
+	return parts
 }
 
 func hexByte(value byte) string {

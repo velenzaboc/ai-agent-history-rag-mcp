@@ -74,8 +74,8 @@ func (c Config) Validate() error {
 	if c.QueryTaskType != TaskRetrievalQuery {
 		return fmt.Errorf("query embedding task type must be %q", TaskRetrievalQuery)
 	}
-	if c.RemoteRPCBatch != 1 {
-		return fmt.Errorf("remote RPC batch must be exactly 1 for %s", EmbeddingModelName)
+	if err := bounded("remote RPC batch", c.RemoteRPCBatch, 1, 5); err != nil {
+		return err
 	}
 	if err := bounded("vector index leaves", c.VectorIndexLeaves, 1, 1_000_000); err != nil {
 		return err

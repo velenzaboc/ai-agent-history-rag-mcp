@@ -75,41 +75,73 @@ func (s *SpannerStore) Initialize(ctx context.Context) error {
 	return nil
 }
 
+func deduplicateChunks(chunks []Chunk) []Chunk {
+	lastIndex := make(map[string]int, len(chunks))
+	for i, chunk := range chunks {
+		lastIndex[chunk.ID] = i
+	}
+	if len(lastIndex) == len(chunks) {
+		return chunks
+	}
+	deduped := make([]Chunk, 0, len(lastIndex))
+	for i, chunk := range chunks {
+		if lastIndex[chunk.ID] == i {
+			deduped = append(deduped, chunk)
+		}
+	}
+	return deduped
+}
+
 func (s *SpannerStore) Upsert(ctx context.Context, chunks []Chunk) error {
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	plan, err := BuildUpsertPlan(s.config, chunks)
+	_, unembedded, err := validateUpsertChunks(s.config, chunks)
 	if err != nil {
 		return err
 	}
-	if err := contextError(ctx); err != nil {
-		return err
+	deduped := deduplicateChunks(chunks)
+	subBatchLimit := 250
+	if s.config.EmbeddingStrategy == EmbeddingRemoteModel && unembedded > 0 {
+		subBatchLimit = 64
 	}
-	if plan.Mutation != nil {
-		if err := s.executor.Apply(ctx, *plan.Mutation); err != nil {
-			return fmt.Errorf("apply chunk mutation: %w", err)
+	for start := 0; start < len(deduped); start += subBatchLimit {
+		end := start + subBatchLimit
+		if end > len(deduped) {
+			end = len(deduped)
 		}
-		s.invalidateStats()
-		return nil
-	}
-	if plan.Statement == nil {
-		return fmt.Errorf("upsert plan has no operation")
-	}
-	if err := s.executor.ReadWrite(ctx, func(transaction Transaction) error {
-		if err := contextError(ctx); err != nil {
-			return err
-		}
-		affected, err := transaction.Execute(ctx, *plan.Statement)
+		subBatch := deduped[start:end]
+		plan, err := BuildUpsertPlan(s.config, subBatch)
 		if err != nil {
 			return err
 		}
-		if affected != int64(len(chunks)) {
-			return fmt.Errorf("remote-model affected count %d does not match batch %d", affected, len(chunks))
+		if err := contextError(ctx); err != nil {
+			return err
 		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("execute remote-model upsert: %w", err)
+		if plan.Mutation != nil {
+			if err := s.executor.Apply(ctx, *plan.Mutation); err != nil {
+				return fmt.Errorf("apply chunk mutation: %w", err)
+			}
+			continue
+		}
+		if plan.Statement == nil {
+			return fmt.Errorf("upsert plan has no operation")
+		}
+		if err := s.executor.ReadWrite(ctx, func(transaction Transaction) error {
+			if err := contextError(ctx); err != nil {
+				return err
+			}
+			affected, err := transaction.Execute(ctx, *plan.Statement)
+			if err != nil {
+				return err
+			}
+			if affected != int64(len(subBatch)) {
+				return fmt.Errorf("remote-model affected count %d does not match batch %d", affected, len(subBatch))
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("execute remote-model upsert: %w", err)
+		}
 	}
 	s.invalidateStats()
 	return nil

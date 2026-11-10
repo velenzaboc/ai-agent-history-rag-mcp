@@ -237,7 +237,9 @@ func newLiveClients(ctx context.Context, databaseName string, token oauth2.Token
 	return bindData(data), bindAdmin(admin, databaseName), nil
 }
 
-var newDataClient = spanner.NewClient
+var newDataClient = func(ctx context.Context, databaseName string, opts ...option.ClientOption) (*spanner.Client, error) {
+	return spanner.NewClientWithConfig(ctx, databaseName, spanner.ClientConfig{DisableNativeMetrics: true}, opts...)
+}
 var newAdminClient = database.NewDatabaseAdminClient
 
 func bindData(client *spanner.Client) liveData {

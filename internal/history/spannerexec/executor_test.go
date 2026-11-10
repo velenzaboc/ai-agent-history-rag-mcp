@@ -304,6 +304,9 @@ func TestNativeAdaptersPreserveRowsMutationsAndConstructorCleanup(t *testing.T) 
 	if _, err := collectRows(func() (store.Row, error) { return nil, errors.New("query failed") }); err == nil {
 		t.Fatal("collectRows accepted query error")
 	}
+	if client, err := newDataClient(context.Background(), "invalid-database", option.WithoutAuthentication()); err == nil && client != nil {
+		client.Close()
+	}
 
 	oldData := newDataClient
 	t.Cleanup(func() { newDataClient = oldData })

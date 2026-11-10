@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -319,5 +321,82 @@ func TestWorkloadOAuthAdapterPreservesRequestCancellationAndHidesProviderErrors(
 	p.fail = true
 	if _, err := s.Token(); err == nil || strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("provider error was not sanitized: %v", err)
+	}
+}
+
+func TestWorkloadTwoHopImpersonationAndCertificateConfigExtensions(t *testing.T) {
+	f := newWorkloadFixture(t)
+	s := f.selector
+	s.CredentialsBaseIdentity = "kopia-arcserver3@jeeves-486102.iam.gserviceaccount.com"
+	s.CredentialsIdentity = "history-rag-runtime@jeeves-486102.iam.gserviceaccount.com"
+	f.carrier["service_account_impersonation_url"] = "https://iamcredentials.mtls.googleapis.com/v1/projects/-/serviceAccounts/" + s.CredentialsBaseIdentity + ":generateAccessToken"
+	f.config["version"] = 1
+	f.config["cert_configs"].(map[string]any)["workload"].(map[string]any)["trust_chain_path"] = f.certPath
+	writeWorkloadJSON(t, f.configPath, f.config)
+	writeWorkloadJSON(t, f.carrierPath, f.carrier)
+
+	if err := s.Validate("google_credentials"); err != nil {
+		t.Fatalf("2-hop Validate() = %v", err)
+	}
+	if _, err := s.ValidateWorkloadIdentityConfiguration(); err != nil {
+		t.Fatalf("2-hop ValidateWorkloadIdentityConfiguration() = %v", err)
+	}
+	ts, err := s.TokenSource(context.Background())
+	if err != nil || ts == nil {
+		t.Fatalf("2-hop TokenSource() = %v", err)
+	}
+	reqTS, err := s.TokenSourceForRequest(context.Background())
+	if err != nil || reqTS == nil {
+		t.Fatalf("2-hop TokenSourceForRequest() = %v", err)
+	}
+
+	statusCode := http.StatusOK
+	responseBody := `{"accessToken":"hop2-access-token","expireTime":"2026-12-31T23:59:59Z"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer ephemeral-unit-token" {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.Header.Get("x-goog-user-project") != "jeeves-486102" {
+			t.Errorf("x-goog-user-project = %q", r.Header.Get("x-goog-user-project"))
+		}
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer server.Close()
+
+	oldEndpoint := workloadIAMCredentialsEndpoint
+	workloadIAMCredentialsEndpoint = server.URL
+	defer func() { workloadIAMCredentialsEndpoint = oldEndpoint }()
+
+	provider := &workloadRecordingProvider{}
+	hop2 := &workloadImpersonatedTokenSource{
+		ctx:            context.Background(),
+		base:           &workloadOAuthTokenSource{ctx: context.Background(), provider: provider},
+		targetIdentity: s.CredentialsIdentity,
+		quotaProject:   "jeeves-486102",
+		scopes:         []string{CloudPlatformScope},
+		client:         server.Client(),
+	}
+	tok, err := hop2.Token()
+	if err != nil || tok.AccessToken != "hop2-access-token" {
+		t.Fatalf("hop2.Token() = %+v, %v", tok, err)
+	}
+
+	statusCode = http.StatusForbidden
+	if _, err := hop2.Token(); err == nil {
+		t.Fatal("hop2.Token() accepted non-200 status")
+	}
+	statusCode = http.StatusOK
+	responseBody = `{"accessToken":"","expireTime":"bad"}`
+	if _, err := hop2.Token(); err == nil {
+		t.Fatal("hop2.Token() accepted empty accessToken / invalid expireTime")
+	}
+	responseBody = `not-json`
+	if _, err := hop2.Token(); err == nil {
+		t.Fatal("hop2.Token() accepted malformed JSON")
+	}
+	provider.fail = true
+	if _, err := hop2.Token(); err == nil {
+		t.Fatal("hop2.Token() accepted failed hop-1 token")
 	}
 }

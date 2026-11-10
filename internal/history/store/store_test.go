@@ -20,9 +20,10 @@ type fakeExecutor struct {
 	ddl         [][]DDLStatement
 	queryRows   []Row
 	queryErr    error
-	queryQueue  []queryResponse
-	executeRows int64
-	executeErr  error
+	queryQueue   []queryResponse
+	executeRows  int64
+	executeQueue []int64
+	executeErr   error
 	applyErr    error
 	ddlErr      error
 	closeCalls  int
@@ -49,6 +50,11 @@ func (f *fakeExecutor) Execute(_ context.Context, statement Statement) (int64, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.executions = append(f.executions, statement)
+	if len(f.executeQueue) != 0 {
+		rows := f.executeQueue[0]
+		f.executeQueue = f.executeQueue[1:]
+		return rows, f.executeErr
+	}
 	return f.executeRows, f.executeErr
 }
 
@@ -150,7 +156,7 @@ func TestConfigRequiresExplicitProductionEmbeddingStrategy(t *testing.T) {
 		func() Config { c := validConfig(EmbeddingRemoteModel); c.RemoteModel = "bad"; return c }(),
 		func() Config { c := validConfig(EmbeddingRemoteModel); c.EmbeddingModel = "bad"; return c }(),
 		func() Config { c := validConfig(EmbeddingRemoteModel); c.EmbeddingDimension = 768; return c }(),
-		func() Config { c := validConfig(EmbeddingRemoteModel); c.RemoteRPCBatch = 2; return c }(),
+		func() Config { c := validConfig(EmbeddingRemoteModel); c.RemoteRPCBatch = 6; return c }(),
 		func() Config { c := validConfig(EmbeddingRemoteModel); c.BackfillConcurrency = 257; return c }(),
 		func() Config { c := validConfig(EmbeddingRemoteModel); c.BackfillBatch = 2001; return c }(),
 		func() Config { c := validConfig(EmbeddingRemoteModel); c.BackfillInterval = 9 * time.Second; return c }(),
@@ -158,6 +164,11 @@ func TestConfigRequiresExplicitProductionEmbeddingStrategy(t *testing.T) {
 		if err := bad.Validate(); err == nil {
 			t.Fatalf("Validate() accepted invalid config: %+v", bad)
 		}
+	}
+	batchFive := validConfig(EmbeddingRemoteModel)
+	batchFive.RemoteRPCBatch = 5
+	if err := batchFive.Validate(); err != nil {
+		t.Fatalf("Validate() rejected RemoteRPCBatch=5: %v", err)
 	}
 }
 
@@ -167,7 +178,7 @@ func TestConfigClosesEmbeddingRolesRegionAndBatch(t *testing.T) {
 		"query role":    func(config *Config) { config.QueryTaskType = TaskRetrievalDocument },
 		"zone":          func(config *Config) { config.ModelLocation = "us-central1-a" },
 		"batch zero":    func(config *Config) { config.RemoteRPCBatch = 0 },
-		"batch two":     func(config *Config) { config.RemoteRPCBatch = 2 },
+		"batch six":     func(config *Config) { config.RemoteRPCBatch = 6 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := validConfig(EmbeddingRemoteModel)
@@ -1202,6 +1213,120 @@ func TestBackfillRowsPreservesValidatedOptionalValues(t *testing.T) {
 	children[0] = "mutated"
 	if chunks[0].UserUUID != "user" || chunks[0].ChildChunkIDs[0] != "0bchild" {
 		t.Fatalf("backfillRows() did not preserve safe values: %#v", chunks[0])
+	}
+}
+
+func TestUpsertDeduplicatesLastWriteWinsAndSubBatchesLargeSessions(t *testing.T) {
+	t.Run("invalid duplicate rejected before deduplication", func(t *testing.T) {
+		executor := &fakeExecutor{}
+		s, err := New(validConfig(EmbeddingRemoteModel), executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := validChunk("0adup")
+		bad.Content = ""
+		good := validChunk("0adup")
+		if err := s.Upsert(context.Background(), []Chunk{bad, good}); err == nil {
+			t.Fatal("Upsert accepted invalid earlier duplicate chunk")
+		}
+		if len(executor.executions)+len(executor.mutations) != 0 {
+			t.Fatal("executor called for invalid duplicate batch")
+		}
+	})
+
+	t.Run("deduplicates last write wins preserving final occurrence order", func(t *testing.T) {
+		executor := &fakeExecutor{executeRows: 2}
+		s, err := New(validConfig(EmbeddingRemoteModel), executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := validChunk("0afirst")
+		first.Content = "stale-first"
+		second := validChunk("0bsecond")
+		second.Content = "kept-second"
+		updatedFirst := validChunk("0afirst")
+		updatedFirst.Content = "fresh-first"
+		if err := s.Upsert(context.Background(), []Chunk{first, second, updatedFirst}); err != nil {
+			t.Fatalf("Upsert(dedup) = %v", err)
+		}
+		if len(executor.executions) != 1 {
+			t.Fatalf("executions = %d, want 1", len(executor.executions))
+		}
+		rows := executor.executions[0].Params["rows"].([]RemoteEmbeddingRow)
+		if len(rows) != 2 || rows[0].ID != "0bsecond" || rows[1].ID != "0afirst" || rows[1].Content != "fresh-first" {
+			t.Fatalf("deduplicated rows = %+v", rows)
+		}
+	})
+
+	t.Run("remote model sub-batches at 64 chunks", func(t *testing.T) {
+		executor := &fakeExecutor{executeQueue: []int64{64, 1}}
+		s, err := New(validConfig(EmbeddingRemoteModel), executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunks := make([]Chunk, 65)
+		for i := range chunks {
+			chunks[i] = validChunk(fmt.Sprintf("%02x-chunk-%d", i%256, i))
+		}
+		if err := s.Upsert(context.Background(), chunks); err != nil {
+			t.Fatalf("Upsert(65 remote chunks) = %v", err)
+		}
+		if len(executor.executions) != 2 {
+			t.Fatalf("executions = %d, want 2", len(executor.executions))
+		}
+		if got := len(executor.executions[0].Params["rows"].([]RemoteEmbeddingRow)); got != 64 {
+			t.Fatalf("sub-batch 0 rows = %d, want 64", got)
+		}
+		if got := len(executor.executions[1].Params["rows"].([]RemoteEmbeddingRow)); got != 1 {
+			t.Fatalf("sub-batch 1 rows = %d, want 1", got)
+		}
+	})
+
+	t.Run("mutation sub-batches at 250 chunks", func(t *testing.T) {
+		executor := &fakeExecutor{}
+		s, err := New(validConfig(EmbeddingDeferred), executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunks := make([]Chunk, 251)
+		for i := range chunks {
+			chunks[i] = validChunk(fmt.Sprintf("%02x-chunk-%d", i%256, i))
+		}
+		if err := s.Upsert(context.Background(), chunks); err != nil {
+			t.Fatalf("Upsert(251 deferred chunks) = %v", err)
+		}
+		if len(executor.mutations) != 2 || len(executor.mutations[0].Values) != 250 || len(executor.mutations[1].Values) != 1 {
+			t.Fatalf("mutation sub-batches = %d", len(executor.mutations))
+		}
+	})
+}
+
+func TestValidateChunkEnforces2MiBCeilingAndSplitChunkContentIsUTF8Safe(t *testing.T) {
+	oversized := validChunk("0aoversized")
+	oversized.Content = strings.Repeat("x", MaxChunkContentBytes+1)
+	if err := validateChunk(oversized); err == nil {
+		t.Fatal("validateChunk accepted content exceeding 2 MiB")
+	}
+
+	short := SplitChunkContent("hello", 0)
+	if len(short) != 1 || short[0] != "hello" {
+		t.Fatalf("SplitChunkContent(short) = %#v", short)
+	}
+
+	multiByte := strings.Repeat("─", 20)
+	parts := SplitChunkContent(multiByte, 10)
+	if len(parts) == 0 || strings.Join(parts, "") != multiByte {
+		t.Fatalf("SplitChunkContent(multiByte, 10) = %#v", parts)
+	}
+	for _, part := range parts {
+		if len(part) > 10 {
+			t.Fatalf("part length %d exceeds 10", len(part))
+		}
+	}
+
+	tinyParts := SplitChunkContent("───", 2)
+	if len(tinyParts) != 3 || strings.Join(tinyParts, "") != "───" {
+		t.Fatalf("SplitChunkContent(tiny, 2) = %#v", tinyParts)
 	}
 }
 
