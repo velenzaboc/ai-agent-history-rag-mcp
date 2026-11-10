@@ -323,7 +323,7 @@ func (r *Root) Remove(name string, expectedSHA256 [32]byte) (bool, error) {
 	if err := validateFile(value); err != nil {
 		return false, err
 	}
-	payload, err := r.readLockedWithoutMutex(fd, name, 16<<20)
+	payload, err := r.readLockedWithoutMutex(fd, name, 128<<20)
 	if err != nil {
 		return false, err
 	}

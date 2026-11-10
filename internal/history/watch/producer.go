@@ -87,7 +87,7 @@ func (p *Producer) Run(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("watch producer context is required")
 	}
-	if err := p.Scan(ctx); err != nil {
+	if err := p.runScan(ctx); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(p.interval)
@@ -97,11 +97,27 @@ func (p *Producer) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := p.Scan(ctx); err != nil {
+			if err := p.runScan(ctx); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func (p *Producer) runScan(ctx context.Context) error {
+	p.mu.RLock()
+	forward := p.forward != nil
+	p.mu.RUnlock()
+	if !forward {
+		return p.Scan(ctx)
+	}
+	scanCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	err := p.Scan(scanCtx)
+	cancel()
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return nil
 }
 
 func (p *Producer) Scan(ctx context.Context) error {

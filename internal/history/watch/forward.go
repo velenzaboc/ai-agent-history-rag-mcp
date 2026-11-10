@@ -3,12 +3,14 @@ package watch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -23,6 +25,7 @@ import (
 	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/source/claudeapp"
 	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/source/codex"
 	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/source/gemini"
+	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/store"
 )
 
 const (
@@ -38,8 +41,9 @@ var (
 	persistForwardState = func(root *durable.Root, name string, payload []byte) error {
 		return root.WriteAtomic(name, payload)
 	}
-	forwardSessionID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-	forwardObjectID  = regexp.MustCompile(`^[0-9a-f]{16}:[0-9a-f]{16}$`)
+	forwardSessionID        = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	forwardObjectID         = regexp.MustCompile(`^[0-9a-f]{16}:[0-9a-f]{16}$`)
+	errForwardScanBatchFull = errors.New("forward scan batch full")
 )
 
 type forwardRootState struct {
@@ -59,8 +63,9 @@ type forwardState struct {
 }
 
 type forwardTracker struct {
-	root  *durable.Root
-	state forwardState
+	root            *durable.Root
+	state           forwardState
+	ingestedDigests map[string]string
 }
 
 type forwardEligibility int
@@ -100,10 +105,10 @@ func NewForwardProducer(registry Registry, sink ChunkSink, paths []string, inter
 		if err != nil {
 			return fail(err)
 		}
-		if !slices.Equal(state.Roots, roots) {
-			return fail(errors.New("forward watch roots do not match durable state"))
+		if err := reconcileForwardRoots(producer, stateRoot, &state, roots); err != nil {
+			return fail(err)
 		}
-		producer.forward = &forwardTracker{root: stateRoot, state: state}
+		producer.forward = &forwardTracker{root: stateRoot, state: state, ingestedDigests: make(map[string]string)}
 		return producer, nil
 	}
 
@@ -122,8 +127,57 @@ func NewForwardProducer(registry Registry, sink ChunkSink, paths []string, inter
 	if err := writeForwardState(stateRoot, state); err != nil {
 		return fail(fmt.Errorf("persist initial forward state: %w", err))
 	}
-	producer.forward = &forwardTracker{root: stateRoot, state: state}
+	producer.forward = &forwardTracker{root: stateRoot, state: state, ingestedDigests: make(map[string]string)}
 	return producer, nil
+}
+
+func reconcileForwardRoots(producer *Producer, stateRoot *durable.Root, state *forwardState, roots []forwardRootState) error {
+	currentByPath := make(map[string]forwardRootState, len(roots))
+	for _, root := range roots {
+		currentByPath[root.Path] = root
+	}
+	priorPaths := make(map[string]bool, len(state.Roots))
+	stateChanged := false
+	for _, prior := range state.Roots {
+		current, ok := currentByPath[prior.Path]
+		if !ok {
+			return errors.New("forward watch root set changed")
+		}
+		if current.Object != prior.Object {
+			return errors.New("forward watch root identity changed")
+		}
+		if current.Volume != prior.Volume {
+			oldPrefix := fmt.Sprintf("%016x:", prior.Volume)
+			newPrefix := fmt.Sprintf("%016x:", current.Volume)
+			for key := range state.ExcludedObjects {
+				if strings.HasPrefix(strings.ToLower(key), oldPrefix) {
+					delete(state.ExcludedObjects, key)
+					state.ExcludedObjects[newPrefix+strings.ToLower(key[len(oldPrefix):])] = true
+				}
+			}
+			stateChanged = true
+		}
+		priorPaths[prior.Path] = true
+	}
+	var addedRoots []*PinnedRoot
+	for _, root := range producer.roots {
+		if !priorPaths[root.Path()] {
+			addedRoots = append(addedRoots, root)
+		}
+	}
+	if len(addedRoots) > 0 {
+		if err := baselineForwardPaths(producer.registry, addedRoots, state); err != nil {
+			return err
+		}
+		stateChanged = true
+	}
+	if stateChanged {
+		state.Roots = roots
+		if err := writeForwardState(stateRoot, *state); err != nil {
+			return fmt.Errorf("persist reconciled forward state: %w", err)
+		}
+	}
+	return nil
 }
 
 func currentForwardRoots(roots []*PinnedRoot) ([]forwardRootState, error) {
@@ -163,6 +217,10 @@ func baselineForwardPaths(registry Registry, roots []*PinnedRoot, state *forward
 			}
 			clean := filepath.Clean(path)
 			identity, err := root.forwardSourceIdentity(clean)
+			if errors.Is(err, ErrUnsafeSource) || errors.Is(err, fs.ErrNotExist) {
+				state.ExcludedPaths[clean] = true
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -183,12 +241,29 @@ func baselineForwardPaths(registry Registry, roots []*PinnedRoot, state *forward
 }
 
 func sessionIDFromPath(path string) string {
-	match := forwardSessionID.FindString(filepath.Base(path))
-	return strings.ToLower(match)
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for i, part := range parts {
+		if strings.EqualFold(part, "brain") && i+1 < len(parts) {
+			if match := forwardSessionID.FindString(parts[i+1]); match != "" {
+				return strings.ToLower(match)
+			}
+		}
+		if strings.EqualFold(part, "subagents") && i > 0 {
+			if match := forwardSessionID.FindString(parts[i-1]); match != "" {
+				return strings.ToLower(match)
+			}
+		}
+	}
+	return strings.ToLower(forwardSessionID.FindString(filepath.Base(path)))
 }
 
 func forwardIdentityKey(identity RootIdentity) string {
 	return fmt.Sprintf("%016x:%016x", identity.Volume, identity.Object)
+}
+
+func sha256Hex(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 func loadForwardState(root *durable.Root) (forwardState, error) {
@@ -208,6 +283,9 @@ func loadForwardState(root *durable.Root) (forwardState, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return forwardState{}, errors.New("decode forward state: trailing data")
 	}
+	slices.SortFunc(state.Roots, func(a, b forwardRootState) int {
+		return strings.Compare(a.Path, b.Path)
+	})
 	if err := validateForwardState(state); err != nil {
 		return forwardState{}, err
 	}
@@ -338,9 +416,9 @@ func cloneBoolMap(source map[string]bool) map[string]bool {
 }
 
 func (p *Producer) scanForward(ctx context.Context, roots []*PinnedRoot, tracker *forwardTracker) error {
-	seen := 0
+	changedFiles := 0
 	for _, root := range roots {
-		if err := filepath.WalkDir(root.Path(), func(path string, entry fs.DirEntry, walkErr error) error {
+		err := filepath.WalkDir(root.Path(), func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
@@ -368,18 +446,34 @@ func (p *Producer) scanForward(ctx context.Context, roots []*PinnedRoot, tracker
 				return nil
 			}
 			identity, err := root.forwardSourceIdentity(path)
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrSourceChanged) {
+				return nil
+			}
+			if errors.Is(err, ErrUnsafeSource) {
+				if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
+					return nil
+				}
+				return refuseForwardPath(tracker, path, RootIdentity{}, nil)
+			}
 			if err != nil {
 				return err
 			}
 			if tracker.state.ExcludedObjects[forwardIdentityKey(identity)] {
 				return nil
 			}
-			seen++
-			if seen > MaxFilesPerScan {
-				return ErrScanLimit
+			changed, err := p.processForwardPath(ctx, root, path, kind, identity, tracker, changedFiles >= MaxFilesPerScan)
+			if err != nil {
+				return err
 			}
-			return p.processForwardPath(ctx, root, path, kind, identity, tracker)
-		}); err != nil {
+			if changed {
+				changedFiles++
+			}
+			return nil
+		})
+		if errors.Is(err, errForwardScanBatchFull) {
+			break
+		}
+		if err != nil {
 			p.setReady(false)
 			return err
 		}
@@ -388,70 +482,128 @@ func (p *Producer) scanForward(ctx context.Context, roots []*PinnedRoot, tracker
 	return nil
 }
 
-func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, path string, kind SourceKind, identity RootIdentity, tracker *forwardTracker) error {
+func (p *Producer) processForwardPath(ctx context.Context, root *PinnedRoot, path string, kind SourceKind, identity RootIdentity, tracker *forwardTracker, batchFull bool) (bool, error) {
 	snapshot, err := snapshotForwardSource(root, path, MaxSourceSnapshotBytes)
+	if errors.Is(err, ErrSourceChanged) || errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if errors.Is(err, ErrUnsafeSource) {
+		if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, refuseForwardPath(tracker, path, identity, nil)
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	snapshotIdentity := snapshot.SourceIdentity()
 	if snapshotIdentity == (RootIdentity{}) || snapshotIdentity != identity {
-		if closeErr := snapshot.Close(); closeErr != nil {
-			return closeErr
-		}
-		return ErrSourceChanged
+		return false, snapshot.Close()
 	}
 	if tracker.state.ExcludedObjects[forwardIdentityKey(snapshotIdentity)] {
-		return snapshot.Close()
+		return false, snapshot.Close()
 	}
 	digestBytes := snapshot.SHA256()
 	digest := hex.EncodeToString(digestBytes[:])
 	if tracker.state.Progress[path] == digest {
-		return snapshot.Close()
+		return false, snapshot.Close()
+	}
+	if batchFull {
+		_ = snapshot.Close()
+		return false, errForwardScanBatchFull
 	}
 
-	eligibility, sessions := inspectForwardEligibility(kind, snapshot, tracker.state.Cutoff)
+	isExport := kind == SourceChatGPT || kind == SourceClaudeApp
+	eligibility, sessions := inspectForwardEligibilityWithExclusions(kind, snapshot, tracker.state.Cutoff, tracker.state.ExcludedSessions)
 	if eligibility == forwardWait {
-		return snapshot.Close()
+		return false, snapshot.Close()
 	}
-	if eligibility == forwardRefuse || containsExcludedSession(tracker.state.ExcludedSessions, sessions) {
+	if eligibility == forwardRefuse || (!isExport && containsExcludedSession(tracker.state.ExcludedSessions, sessions)) {
 		if closeErr := snapshot.Close(); closeErr != nil {
-			return closeErr
+			return false, closeErr
 		}
-		return refuseForwardPath(tracker, path, identity, sessions)
+		return true, refuseForwardPath(tracker, path, identity, sessions)
+	}
+	if isExport {
+		for _, session := range sessions {
+			if session = strings.ToLower(strings.TrimSpace(session)); reliableForwardSession(session) {
+				tracker.state.ExcludedSessions[session] = true
+			}
+		}
 	}
 
 	chunks, dispatchErr := p.registry.Dispatch(kind, snapshot.Reader(), path)
 	closeErr := snapshot.Close()
 	if dispatchErr != nil {
-		return dispatchErr
+		return false, dispatchErr
 	}
 	if closeErr != nil {
-		return closeErr
+		return false, closeErr
+	}
+	if isExport {
+		filtered := make([]store.Chunk, 0, len(chunks))
+		for _, chunk := range chunks {
+			if !tracker.state.ExcludedSessions[strings.ToLower(strings.TrimSpace(chunk.SessionID))] && !chunk.Timestamp.IsZero() && !chunk.Timestamp.Before(tracker.state.Cutoff) {
+				filtered = append(filtered, chunk)
+			}
+		}
+		chunks = filtered
 	}
 	if len(chunks) == 0 {
-		return nil
+		return false, nil
+	}
+	fallback := tracker.state.Cutoff
+	for _, chunk := range chunks {
+		if !chunk.Timestamp.IsZero() && chunk.Timestamp.Unix() > 1 && !chunk.Timestamp.Before(tracker.state.Cutoff) {
+			fallback = chunk.Timestamp
+			break
+		}
+	}
+	nearest := fallback
+	for i := range chunks {
+		if !chunks[i].Timestamp.IsZero() && chunks[i].Timestamp.Unix() > 1 && !chunks[i].Timestamp.Before(tracker.state.Cutoff) {
+			nearest = chunks[i].Timestamp
+		} else if chunks[i].Timestamp.IsZero() || chunks[i].Timestamp.Unix() <= 1 {
+			chunks[i].Timestamp = nearest
+		}
 	}
 	for _, chunk := range chunks {
 		if chunk.Timestamp.IsZero() || chunk.Timestamp.Before(tracker.state.Cutoff) || tracker.state.ExcludedSessions[strings.ToLower(chunk.SessionID)] {
-			return refuseForwardPath(tracker, path, identity, append(sessions, chunk.SessionID))
+			return true, refuseForwardPath(tracker, path, identity, append(sessions, chunk.SessionID))
 		}
 	}
-	if err := p.sink.Upsert(ctx, chunks); err != nil {
-		return err
+	if tracker.ingestedDigests == nil {
+		tracker.ingestedDigests = make(map[string]string)
+	}
+	novelChunks := make([]store.Chunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		if tracker.ingestedDigests[chunk.ID] != sha256Hex(chunk.Content) {
+			novelChunks = append(novelChunks, chunk)
+		}
+	}
+	if len(novelChunks) > 0 {
+		if err := p.sink.Upsert(ctx, novelChunks); err != nil {
+			return false, err
+		}
 	}
 	next := cloneForwardState(tracker.state)
 	next.Progress[path] = digest
 	if err := writeForwardState(tracker.root, next); err != nil {
-		return fmt.Errorf("persist forward progress: %w", err)
+		return false, fmt.Errorf("persist forward progress: %w", err)
+	}
+	for _, chunk := range novelChunks {
+		tracker.ingestedDigests[chunk.ID] = sha256Hex(chunk.Content)
 	}
 	tracker.state = next
-	return nil
+	return true, nil
 }
 
 func refuseForwardPath(tracker *forwardTracker, path string, identity RootIdentity, sessions []string) error {
 	next := cloneForwardState(tracker.state)
 	next.ExcludedPaths[path] = true
-	next.ExcludedObjects[forwardIdentityKey(identity)] = true
+	if identity != (RootIdentity{}) {
+		next.ExcludedObjects[forwardIdentityKey(identity)] = true
+	}
 	for _, session := range sessions {
 		if session = strings.ToLower(strings.TrimSpace(session)); reliableForwardSession(session) {
 			next.ExcludedSessions[session] = true
@@ -486,6 +638,10 @@ func containsExcludedSession(excluded map[string]bool, sessions []string) bool {
 }
 
 func inspectForwardEligibility(kind SourceKind, snapshot *Snapshot, cutoff time.Time) (forwardEligibility, []string) {
+	return inspectForwardEligibilityWithExclusions(kind, snapshot, cutoff, nil)
+}
+
+func inspectForwardEligibilityWithExclusions(kind SourceKind, snapshot *Snapshot, cutoff time.Time, excluded map[string]bool) (forwardEligibility, []string) {
 	switch kind {
 	case SourceClaude:
 		entries, issues, err := claude.Parse(snapshot.Reader(), snapshot.Size())
@@ -506,12 +662,11 @@ func inspectForwardEligibility(kind SourceKind, snapshot *Snapshot, cutoff time.
 			if entry.SessionID != "" {
 				sessions = append(sessions, entry.SessionID)
 			}
-			meaningful := entry.Message != nil || strings.TrimSpace(entry.Summary) != "" || entry.CompactSummary
-			if !meaningful {
-				continue
-			}
 			if !entry.HasTimestamp {
-				return forwardRefuse, sessions
+				if entry.Message != nil {
+					return forwardRefuse, sessions
+				}
+				continue
 			}
 			times = append(times, entry.Timestamp)
 		}
@@ -540,7 +695,10 @@ func inspectForwardEligibility(kind SourceKind, snapshot *Snapshot, cutoff time.
 				}
 			}
 			if !event.HasTime {
-				return forwardRefuse, sessions
+				if event.Type == "response_item" && event.Payload["type"] == "message" {
+					return forwardRefuse, sessions
+				}
+				continue
 			}
 			times = append(times, event.Timestamp)
 		}
@@ -553,7 +711,10 @@ func inspectForwardEligibility(kind SourceKind, snapshot *Snapshot, cutoff time.
 		times := make([]time.Time, 0, len(document.Messages)+len(document.Events))
 		for _, message := range document.Messages {
 			if !message.HasTime {
-				return forwardRefuse, []string{document.SessionID}
+				if message.Type == "user" || message.Type == "gemini" {
+					return forwardRefuse, []string{document.SessionID}
+				}
+				continue
 			}
 			times = append(times, message.Timestamp)
 		}
@@ -569,7 +730,7 @@ func inspectForwardEligibility(kind SourceKind, snapshot *Snapshot, cutoff time.
 			if snapshot.Size() == 0 {
 				return forwardWait, nil
 			}
-			return forwardRefuse, []string{sessionIDFromPath(snapshot.SourcePath())}
+			return forwardRefuse, nil
 		}
 		events, issues, err := antigravity.Parse(snapshot.Reader(), snapshot.Size())
 		if err != nil {
@@ -584,56 +745,89 @@ func inspectForwardEligibility(kind SourceKind, snapshot *Snapshot, cutoff time.
 			return forwardWait, nil
 		}
 		times := make([]time.Time, 0, len(events))
+		var sessions []string
+		if session := sessionIDFromPath(snapshot.SourcePath()); session != "" {
+			sessions = []string{session}
+		}
 		for _, event := range events {
 			if !event.HasTime {
-				return forwardRefuse, nil
+				if (strings.EqualFold(event.Source, "user") || strings.EqualFold(event.Source, "agent")) && strings.EqualFold(event.Type, "message") {
+					return forwardRefuse, sessions
+				}
+				continue
 			}
 			times = append(times, event.Timestamp)
 		}
-		return classifyForwardTimes(times, nil, cutoff)
+		return classifyForwardTimes(times, sessions, cutoff)
 	case SourceChatGPT:
 		conversations, issues, err := chatgpt.Parse(snapshot.Reader(), snapshot.Size())
 		if err != nil || len(issues) != 0 {
 			return forwardWait, nil
 		}
-		var times []time.Time
-		var sessions []string
+		var accepted int
+		var refused []string
 		for _, conversation := range conversations {
-			sessions = append(sessions, conversation.ID)
+			var times []time.Time
+			invalid := excluded[strings.ToLower(strings.TrimSpace(conversation.ID))]
 			for _, message := range conversation.Messages {
 				if strings.TrimSpace(message.Content) == "" {
 					continue
 				}
-				if !message.HasTime {
-					return forwardRefuse, sessions
+				if !message.HasTime || message.Timestamp.IsZero() || message.Timestamp.Before(cutoff) {
+					invalid = true
+				} else {
+					times = append(times, message.Timestamp)
 				}
-				times = append(times, message.Timestamp)
+			}
+			if invalid {
+				refused = append(refused, conversation.ID)
+			} else if len(times) > 0 {
+				accepted++
 			}
 		}
-		return classifyForwardTimes(times, sessions, cutoff)
+		return classifyExportConversations(accepted, refused)
 	case SourceClaudeApp:
 		conversations, issues, err := claudeapp.Parse(snapshot.Reader(), snapshot.Size())
 		if err != nil || len(issues) != 0 {
 			return forwardWait, nil
 		}
-		var times []time.Time
-		var sessions []string
+		var accepted int
+		var refused []string
 		for _, conversation := range conversations {
-			sessions = append(sessions, conversation.ID)
+			var times []time.Time
+			invalid := excluded[strings.ToLower(strings.TrimSpace(conversation.ID))]
 			for _, message := range conversation.Messages {
 				if strings.TrimSpace(message.Content) == "" {
 					continue
 				}
-				if !message.HasTime {
-					return forwardRefuse, sessions
+				if !message.HasTime || message.Timestamp.IsZero() || message.Timestamp.Before(cutoff) {
+					invalid = true
+				} else {
+					times = append(times, message.Timestamp)
 				}
-				times = append(times, message.Timestamp)
+			}
+			if invalid {
+				refused = append(refused, conversation.ID)
+			} else if len(times) > 0 {
+				accepted++
 			}
 		}
-		return classifyForwardTimes(times, sessions, cutoff)
+		return classifyExportConversations(accepted, refused)
 	default:
 		return forwardWait, nil
 	}
+}
+
+func classifyExportConversations(accepted int, refused []string) (forwardEligibility, []string) {
+	sort.Strings(refused)
+	refused = slices.Compact(refused)
+	if accepted > 0 {
+		return forwardAccept, refused
+	}
+	if len(refused) > 0 {
+		return forwardRefuse, refused
+	}
+	return forwardWait, nil
 }
 
 func classifyForwardTimes(times []time.Time, sessions []string, cutoff time.Time) (forwardEligibility, []string) {

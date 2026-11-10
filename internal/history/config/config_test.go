@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -130,7 +131,7 @@ func TestContainerModeRequiresAuthenticatedFixedPublicBind(t *testing.T) {
 	if err := os.WriteFile(path, []byte(validContainer), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := Load(path); err != nil || !cfg.ContainerMode || cfg.Listen != "0.0.0.0:4680" {
+	if cfg, err := Load(path); err != nil || !cfg.ContainerMode || cfg.Listen != "0.0.0.0:4680" || !slices.IsSorted(cfg.WatchRoots) {
 		t.Fatalf("Load(container) = %#v, %v", cfg, err)
 	}
 	for name, value := range map[string]string{

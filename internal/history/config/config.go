@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 const MaxConfigBytes int64 = 64 << 10
@@ -198,6 +199,7 @@ func (cfg *Config) validate() error {
 		}
 		roots[root] = struct{}{}
 	}
+	slices.Sort(cfg.WatchRoots)
 	for label, value := range map[string]string{
 		"state_dir": cfg.StateDir, "pid_file": cfg.PIDFile, "auth_state_file": cfg.AuthStateFile,
 		"checkout_root": cfg.CheckoutRoot, "executable": cfg.Executable,
