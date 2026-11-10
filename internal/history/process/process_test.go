@@ -86,6 +86,10 @@ func TestStartIsIdempotentForExactRunningOwner(t *testing.T) {
 	if exists, err := root.Exists("daemon.pid"); err != nil || !exists {
 		t.Fatalf("pid file exists = %v, %v", exists, err)
 	}
+	ops.signalErr = map[os.Signal]error{os.Interrupt: ErrProcessNotFound}
+	if shouldRun, err := controller.Prepare(context.Background(), Supervise, record(999), 0, 0); err != nil || !shouldRun {
+		t.Fatalf("Prepare(term already exited) = %v, %v", shouldRun, err)
+	}
 }
 
 func TestPIDReuseAndSameCheckoutMismatchFailClosed(t *testing.T) {
@@ -193,6 +197,10 @@ func TestSuperviseDirectKillFailureRemainsFailClosed(t *testing.T) {
 	if exists, err := root.Exists("daemon.pid"); err != nil || !exists {
 		t.Fatalf("pid file exists = %v, %v", exists, err)
 	}
+	ops.signalErr = map[os.Signal]error{os.Kill: ErrProcessNotFound}
+	if shouldRun, err := controller.Prepare(context.Background(), Supervise, record(999), 0, 0); err != nil || !shouldRun {
+		t.Fatalf("Prepare(kill already exited) = %v, %v", shouldRun, err)
+	}
 }
 
 func TestWindowsTerminationSourceUsesIdentityBoundProcessKill(t *testing.T) {
@@ -249,6 +257,9 @@ func TestControllerRejectsInvalidConstructionAndRecords(t *testing.T) {
 	}
 	if shouldRun, err := controller.Prepare(context.Background(), Mode(99), record(456), 0, 0); !errors.Is(err, ErrPIDRecordInvalid) || shouldRun {
 		t.Fatalf("Prepare(invalid mode) = %v, %v", shouldRun, err)
+	}
+	if shouldRun, err := controller.Prepare(context.Background(), Start, Record{}, 0, 0); !errors.Is(err, ErrPIDRecordInvalid) || shouldRun {
+		t.Fatalf("Prepare(invalid current record) = %v, %v", shouldRun, err)
 	}
 	shouldRun, err := controller.Prepare(context.Background(), Start, record(456), 0, 0)
 	if err != nil || !shouldRun {
