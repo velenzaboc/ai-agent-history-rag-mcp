@@ -751,10 +751,14 @@ func TestForwardReconcilesVolumeDriftSupersetRootsAndUnsafeSources(t *testing.T)
 	}
 
 	// Replace root1 directory so its inode changes and verify NewForwardProducer refuses it
+	replacementRoot1 := root1 + "-replacement"
+	if err := os.MkdirAll(replacementRoot1, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.RemoveAll(root1); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(root1, 0o700); err != nil {
+	if err := os.Rename(replacementRoot1, root1); err != nil {
 		t.Fatal(err)
 	}
 	if p, err := NewForwardProducer(registry, sink, []string{root1, root2}, time.Second, state); err == nil {

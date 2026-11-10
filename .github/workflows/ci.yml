@@ -82,6 +82,7 @@ jobs:
         run: |
           bash scripts/docker-native.test.sh
           bash scripts/systemd-native.test.sh
+          bash scripts/launchd-native.test.sh
           bash scripts/windows-native.test.sh
           bash scripts/docs-native-contract.test.sh
 
@@ -92,21 +93,3 @@ jobs:
           node scripts/native-store-mutation.test.mjs
           node scripts/native-ingest-wire-mutation.test.mjs
           node scripts/history-rag-native-foundation.mutation.test.mjs
-
-  native-mcp-security-macos:
-    name: native MCP security (macOS)
-    runs-on: macos-14
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-
-      - name: Verify native prerequisites
-        run: for tool in bash jq curl grep awk plutil; do command -v "$tool"; done
-
-      - name: Shell syntax
-        run: bash -n scripts/launchd-native.test.sh
-
-      - name: Native launchd contract
-        run: bash scripts/launchd-native.test.sh

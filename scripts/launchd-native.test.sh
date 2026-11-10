@@ -11,13 +11,33 @@ pass() { PASS_COUNT=$((PASS_COUNT + 1)); printf 'PASS %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1" >&2; exit 1; }
 require_literal() { grep -Fq -- "$2" "$1" || fail "$3: missing $2"; }
 require_absent() { grep -Eqi -- "$2" "$1" && fail "$3: forbidden $2" || true; }
-file_mode() { stat -f '%Lp' "$1"; }
+file_mode() {
+  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
+    stat -f '%Lp' "$1"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+plist_lint() {
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$1" >/dev/null
+  else
+    python3 -c 'import plistlib, sys; plistlib.load(open(sys.argv[1], "rb"))' "$1"
+  fi
+}
+plist_to_json() {
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -convert json -o - "$1"
+  else
+    python3 -c 'import json, plistlib, sys; print(json.dumps(plistlib.load(open(sys.argv[1], "rb"))))' "$1"
+  fi
+}
 
 for file in "$INSTALLER" "$UNINSTALLER" "$TEMPLATE"; do
   [[ -r "$file" ]] || fail "missing launchd file: $file"
 done
 bash -n "$INSTALLER" "$UNINSTALLER" "$ROOT_DIR/scripts/launchd-native.test.sh"
-plutil -lint "$TEMPLATE" >/dev/null
+plist_lint "$TEMPLATE"
 
 for literal in \
   '<string>__HISTORY_RAGD_BIN__</string>' \
@@ -107,7 +127,7 @@ for file in "$INSTALLED_PLIST" "$INSTALLED_CONFIG"; do
   [[ -f "$file" ]] || fail "installer did not write $file"
   [[ "$(file_mode "$file")" == 600 ]] || fail "installer did not protect $file"
 done
-plutil -lint "$INSTALLED_PLIST" >/dev/null
+plist_lint "$INSTALLED_PLIST"
 require_literal "$INSTALLED_PLIST" "<string>$TEST_BIN</string>" "installed native binary"
 require_literal "$INSTALLED_PLIST" '<string>supervise</string>' "installed lifecycle"
 require_literal "$INSTALLED_PLIST" '<key>CLAUDE_HISTORY_RAG_SERVER_PSK</key><string>fixture-secret</string>' "protected authentication"
@@ -197,7 +217,7 @@ pass "installer supports credential home, extra watch roots, checkout root, and 
 
 legacy_hash="$(shasum -a 256 "$INSTALLED_PLIST")"
 READ_ENV=()
-while IFS=$'\t' read -r key value; do READ_ENV+=("$key=$value"); done < <(plutil -convert json -o - "$INSTALLED_PLIST" | jq -r '.EnvironmentVariables | to_entries[] | [.key,.value] | @tsv')
+while IFS=$'\t' read -r key value; do READ_ENV+=("$key=$value"); done < <(plist_to_json "$INSTALLED_PLIST" | jq -r '.EnvironmentVariables | to_entries[] | [.key,.value] | @tsv')
 : > "$TEST_LOG"
 env "${READ_ENV[@]}" HOME="$TEST_HOME" LAUNCHCTL_BIN="$TEST_LAUNCHCTL" LAUNCHCTL_LOG="$TEST_LOG" HISTORY_RAGD_BIN="$RUNTIME_CHECKOUT/bin/history-ragd" CLAUDE_HISTORY_RAG_CHECKOUT_ROOT="$RUNTIME_CHECKOUT" \
  GOOGLE_APPLICATION_CREDENTIALS= CLOUDSDK_CONFIG= CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE= SPANNER_EMULATOR_HOST= \
