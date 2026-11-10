@@ -19,7 +19,7 @@ import (
 
 const (
 	MaxFileBytes          int64 = 10 << 30
-	MaxLineBytes                = 512 << 10
+	MaxLineBytes                = 32 << 20
 	MaxJSONDepth                = 50
 	MaxChunkContentLength       = 8000
 	ChunkOverlap                = 1500
@@ -48,6 +48,10 @@ type Entry struct {
 	Type           string
 	Message        *Message
 	Summary        string
+	Title          string
+	PRUrl          string
+	PRNumber       string
+	PRRepository   string
 	CompactSummary bool
 	UUID           string
 	Timestamp      time.Time
@@ -72,7 +76,7 @@ func Parse(input io.Reader, maxBytes int64) ([]LocatedEntry, []Issue, error) {
 	if maxBytes < 1 || maxBytes > MaxFileBytes {
 		return nil, nil, errors.New("Claude source byte limit is invalid")
 	}
-	reader := bufio.NewReaderSize(&boundedReader{reader: input, remain: maxBytes + 1}, MaxLineBytes+1)
+	reader := bufio.NewReaderSize(&boundedReader{reader: input, remain: maxBytes + 1}, 64<<10)
 	entries := make([]LocatedEntry, 0)
 	issues := make([]Issue, 0)
 	for lineNumber := 1; ; lineNumber++ {
@@ -103,22 +107,72 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 	if source.FilePath == "" {
 		return nil, nil, errors.New("Claude source file identity is required")
 	}
-	projectPath := DecodeProjectPath(source.ProjectEncoded)
+	projectEncoded := strings.TrimSpace(source.ProjectEncoded)
+	if projectEncoded == "" {
+		projectEncoded = projectEncodedFromPath(source.FilePath)
+	}
+	projectPath := DecodeProjectPath(projectEncoded)
 	entries, issues, err := Parse(input, source.MaxBytes)
 	if err != nil {
 		return nil, issues, err
 	}
+	defaultSession := sessionIDFromPath(source.FilePath)
+	var sessionTime time.Time
+	var titles []string
+	hasSummaryEntry := false
+	for _, located := range entries {
+		e := located.Entry
+		if e.SessionID != "" && defaultSession == sessionIDFromPath(source.FilePath) {
+			defaultSession = e.SessionID
+		}
+		if e.HasTimestamp && e.Timestamp.Unix() > 1 && sessionTime.IsZero() {
+			sessionTime = e.Timestamp
+		}
+		if t := strings.TrimSpace(e.Title); t != "" {
+			titles = append(titles, t)
+		}
+		if e.CompactSummary || e.Type == "summary" {
+			hasSummaryEntry = true
+		}
+	}
+	sessionTitle := strings.Join(titles, " / ")
 	chunks := make([]store.Chunk, 0)
 	var pending *LocatedEntry
+	emittedTitleSummary := false
 	for _, located := range entries {
 		entry := located.Entry
+		if entry.SessionID == "" {
+			entry.SessionID = defaultSession
+		}
+		if (!entry.HasTimestamp || entry.Timestamp.Unix() <= 1) && !sessionTime.IsZero() {
+			entry.Timestamp, entry.HasTimestamp = sessionTime, true
+		} else if entry.HasTimestamp && entry.Timestamp.Unix() > 1 {
+			sessionTime = entry.Timestamp
+		}
+		located.Entry = entry
 		if entry.CompactSummary || entry.Type == "summary" {
+			if sessionTitle != "" && entry.Title == "" {
+				entry.Title = sessionTitle
+			}
 			if chunk, ok := summaryChunk(entry, located.Line, projectPath, source); ok {
 				chunks = append(chunks, chunk)
 			}
 			continue
 		}
 		switch entry.Type {
+		case "custom-title", "agent-name":
+			if !hasSummaryEntry && !emittedTitleSummary && sessionTitle != "" {
+				titleEntry := entry
+				titleEntry.Summary = sessionTitle
+				if chunk, ok := summaryChunk(titleEntry, located.Line, projectPath, source); ok {
+					chunks = append(chunks, chunk)
+					emittedTitleSummary = true
+				}
+			}
+		case "pr-link":
+			if chunk, ok := prLinkChunk(entry, located.Line, projectPath, source); ok {
+				chunks = append(chunks, chunk)
+			}
 		case "user":
 			copy := located
 			pending = &copy
@@ -145,7 +199,36 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 	return chunks, issues, nil
 }
 
+func projectEncodedFromPath(filePath string) string {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(filePath)), "/")
+	for i, part := range parts {
+		if part == "projects" && i+1 < len(parts)-1 && parts[i+1] != "" {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+func sessionIDFromPath(filePath string) string {
+	clean := filepath.ToSlash(filepath.Clean(filePath))
+	parts := strings.Split(clean, "/")
+	for i, part := range parts {
+		if part == "subagents" && i > 0 && parts[i-1] != "" && parts[i-1] != "." {
+			return parts[i-1]
+		}
+	}
+	stem := strings.TrimSuffix(filepath.Base(clean), filepath.Ext(clean))
+	if stem == "" || stem == "." || stem == "/" {
+		return "unknown"
+	}
+	return stem
+}
+
 func DecodeProjectPath(encoded string) string {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		return "/unknown"
+	}
 	if strings.Contains(encoded, "..") {
 		return "/invalid/path"
 	}
@@ -173,7 +256,19 @@ func parseEntry(raw []byte) (Entry, string) {
 	if !ok || typeValue == "" {
 		return Entry{}, "missing_type"
 	}
-	entry := Entry{Type: typeValue, Summary: stringValue(object["summary"]), UUID: stringValue(object["uuid"]), SessionID: stringValue(object["sessionId"]), CompactSummary: boolValue(object["isCompactSummary"]), VisibleOnly: boolValue(object["isVisibleInTranscriptOnly"]), MetadataOnly: boolValue(object["isMeta"])}
+	entry := Entry{
+		Type:           typeValue,
+		Summary:        stringValue(object["summary"]),
+		Title:          firstNonEmpty(stringValue(object["customTitle"]), stringValue(object["agentName"]), stringValue(object["title"])),
+		PRUrl:          stringValue(object["prUrl"]),
+		PRNumber:       numberOrString(object["prNumber"]),
+		PRRepository:   stringValue(object["prRepository"]),
+		UUID:           stringValue(object["uuid"]),
+		SessionID:      stringValue(object["sessionId"]),
+		CompactSummary: boolValue(object["isCompactSummary"]),
+		VisibleOnly:    boolValue(object["isVisibleInTranscriptOnly"]),
+		MetadataOnly:   boolValue(object["isMeta"]),
+	}
 	if timestamp := stringValue(object["timestamp"]); timestamp != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, timestamp)
 		if err != nil {
@@ -254,10 +349,32 @@ func summaryChunk(entry Entry, sourceLine int, projectPath string, source Source
 	if text == "" {
 		return store.Chunk{}, false
 	}
+	if entry.Title != "" && entry.Title != text {
+		text = "Title: " + entry.Title + "\n" + text
+	}
 	timestamp := entryTimestamp(entry, Entry{}, sourceLine)
-	session, projectName := firstNonEmpty(entry.SessionID, "unknown"), filepath.Base(projectPath)
+	session, projectName := firstNonEmpty(entry.SessionID, sessionIDFromPath(source.FilePath), "unknown"), filepath.Base(projectPath)
 	content := "Session summary for " + projectName + ":\n" + text
 	return store.Chunk{ID: chunkID(content, session, canonicalTimestamp(timestamp)), Content: content, ChunkType: "summary", SessionID: session, ProjectPath: projectPath, ProjectName: projectName, Timestamp: timestamp, SourceFile: source.FilePath, SourceLine: int64(sourceLine), MachineID: source.MachineID}, true
+}
+
+func prLinkChunk(entry Entry, sourceLine int, projectPath string, source Source) (store.Chunk, bool) {
+	if entry.PRUrl == "" && entry.PRNumber == "" && entry.PRRepository == "" {
+		return store.Chunk{}, false
+	}
+	timestamp := entryTimestamp(entry, Entry{}, sourceLine)
+	session, projectName := firstNonEmpty(entry.SessionID, sessionIDFromPath(source.FilePath), "unknown"), filepath.Base(projectPath)
+	content := fmt.Sprintf("In project %s, linked pull request", projectName)
+	if entry.PRRepository != "" {
+		content += " in " + entry.PRRepository
+	}
+	if entry.PRNumber != "" {
+		content += " #" + entry.PRNumber
+	}
+	if entry.PRUrl != "" {
+		content += ": " + entry.PRUrl
+	}
+	return store.Chunk{ID: chunkID(content, session, canonicalTimestamp(timestamp)), Content: content, ChunkType: "turn", SessionID: session, ProjectPath: projectPath, ProjectName: projectName, Timestamp: timestamp, SourceFile: source.FilePath, SourceLine: int64(sourceLine), MachineID: source.MachineID}, true
 }
 
 func fileChunks(entry Entry, userText string, sourceLine int, parent, projectPath string, source Source) []store.Chunk {
@@ -385,8 +502,14 @@ func splitContent(content string) []string {
 		} else if candidate := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); candidate > 0 {
 			end = searchStart + candidate + 1
 		}
+		for end > start && (content[end]&0xc0) == 0x80 {
+			end--
+		}
 		parts = append(parts, content[start:end])
 		start = max(start+1, end-ChunkOverlap)
+		for start < len(content) && (content[start]&0xc0) == 0x80 {
+			start++
+		}
 	}
 	return parts
 }
@@ -413,7 +536,16 @@ func chunkID(content, session, timestamp string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 func stringValue(value any) string { text, _ := value.(string); return text }
-func boolValue(value any) bool     { result, _ := value.(bool); return result }
+func numberOrString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case float64:
+		return fmt.Sprintf("%.0f", typed)
+	}
+	return ""
+}
+func boolValue(value any) bool { result, _ := value.(bool); return result }
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -470,7 +602,7 @@ func (r *boundedReader) Read(payload []byte) (int, error) {
 }
 
 func readLine(reader *bufio.Reader) ([]byte, bool, bool, error) {
-	line := make([]byte, 0, MaxLineBytes)
+	var line []byte
 	for {
 		fragment, err := reader.ReadSlice('\n')
 		line = append(line, fragment...)
