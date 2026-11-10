@@ -38,7 +38,7 @@ require_absent "$UNIT_TEMPLATE" '(^|[^[:alnum:]_])(python|uv)([^[:alnum:]_]|$)' 
 require_absent "$INSTALLER" '(^|[^[:alnum:]_])(python|uv)([^[:alnum:]_]|$)' "native installer contract"
 pass "unit selects the hardened native foreground daemon"
 
-TMP_DIR="$(mktemp -d)"
+TMP_DIR="$(cd "$(mktemp -d)" && pwd -P)"
 TEST_PROJECT="$(mktemp -d "$ROOT_DIR/.systemd-native-test.XXXXXX")"
 cleanup() { rm -rf -- "$TMP_DIR" "$TEST_PROJECT"; }
 trap cleanup EXIT
@@ -56,17 +56,18 @@ cat > "$TEST_SYSTEMCTL" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:?}"
-if [[ "$*" == *"enable --now ai-agent-history-rag"* ]]; then
+if [[ "$*" == *"enable --now ai-agent-history-rag"* && "${SKIP_DEFAULT_ENABLE_CHECK:-}" != "1" ]]; then
   jq -e --arg home "${EXPECTED_HOME:?}" '
     .listen == "127.0.0.1:4680" and
     .auth_enabled == true and
     .watch_roots == [
-      ($home + "/.claude/projects"),
-      ($home + "/.codex/sessions"),
-      ($home + "/.gemini/tmp"),
-      ($home + "/.gemini/antigravity"),
       ($home + "/.claude-history-rag/imports/chatgpt"),
       ($home + "/.claude-history-rag/imports/claude-app"),
+      ($home + "/.claude/projects"),
+      ($home + "/.codex/archived_sessions"),
+      ($home + "/.codex/sessions"),
+      ($home + "/.gemini/antigravity"),
+      ($home + "/.gemini/tmp"),
       ($home + "/.velenza/provider-profiles/claude"),
       ($home + "/.velenza/provider-profiles/codex")
     ]
@@ -123,16 +124,17 @@ jq -e --arg home "$TEST_HOME" '
   .listen == "127.0.0.1:4680" and
   .auth_enabled == true and
   .watch_roots == [
-    ($home + "/.claude/projects"),
-    ($home + "/.codex/sessions"),
-    ($home + "/.gemini/tmp"),
-    ($home + "/.gemini/antigravity"),
     ($home + "/.claude-history-rag/imports/chatgpt"),
     ($home + "/.claude-history-rag/imports/claude-app"),
+    ($home + "/.claude/projects"),
+    ($home + "/.codex/archived_sessions"),
+    ($home + "/.codex/sessions"),
+    ($home + "/.gemini/antigravity"),
+    ($home + "/.gemini/tmp"),
     ($home + "/.velenza/provider-profiles/claude"),
     ($home + "/.velenza/provider-profiles/codex")
   ]
-' "$INSTALLED_CONFIG" >/dev/null || fail "generated config does not carry the exact eight protected loopback roots"
+' "$INSTALLED_CONFIG" >/dev/null || fail "generated config does not carry the exact nine sorted loopback roots"
 while IFS= read -r root; do
   [[ -d "$root" && ! -L "$root" ]] || fail "watch root was not created before service start: $root"
 done < <(jq -r '.watch_roots[]' "$INSTALLED_CONFIG")
@@ -140,7 +142,76 @@ require_literal "$INSTALLED_ENV" 'CLAUDE_HISTORY_RAG_STORAGE_BACKEND=spanner' "S
 require_absent "$INSTALLED_ENV" 'GOOGLE_APPLICATION_CREDENTIALS|SPANNER_EMULATOR_HOST' "environment overrides"
 require_literal "$TEST_LOG" '--user daemon-reload' "systemctl reload"
 require_literal "$TEST_LOG" '--user enable --now ai-agent-history-rag' "systemctl enable"
-pass "installer writes protected loopback-only production unit with eight pre-created roots"
+pass "installer writes protected loopback-only production unit with nine pre-created sorted roots"
+
+# Exercise workload_identity_federation, CLAUDE_HISTORY_RAG_CREDENTIAL_HOME,
+# CLAUDE_HISTORY_RAG_EXTRA_WATCH_ROOTS, CLAUDE_HISTORY_RAG_CHECKOUT_ROOT, and
+# CLAUDE_HISTORY_RAG_RESET_FORWARD_CUTOFF=true.
+CRED_HOME="$TMP_DIR/cred-home"
+mkdir -p -m 700 "$CRED_HOME" "$CRED_HOME/.config/gcloud"
+chmod 700 "$CRED_HOME"
+printf '{"type":"impersonated_service_account"}\n' > "$CRED_HOME/.config/gcloud/application_default_credentials.json"
+chmod 600 "$CRED_HOME/.config/gcloud/application_default_credentials.json"
+WIF_ADC="$TMP_DIR/wif-adc.json"
+printf '{"type":"external_account"}\n' > "$WIF_ADC"
+chmod 600 "$WIF_ADC"
+EXTRA_A="$TMP_DIR/extra-codex/sessions"
+EXTRA_B="$TMP_DIR/extra-codex/archived_sessions"
+RUNTIME_CHECKOUT="$TMP_DIR/runtime-checkout"
+mkdir -p "$RUNTIME_CHECKOUT/bin"
+cp "$TEST_BIN" "$RUNTIME_CHECKOUT/bin/history-ragd"
+chmod 700 "$RUNTIME_CHECKOUT/bin/history-ragd"
+printf '{"cutoff":"stale"}\n' > "$TEST_HOME/.claude-history-rag/forward.json"
+
+env \
+  HOME="$TEST_HOME" \
+  XDG_CONFIG_HOME="$TEST_HOME/.config" \
+  SKIP_DEFAULT_ENABLE_CHECK=1 \
+  SYSTEMCTL_BIN="$TEST_SYSTEMCTL" \
+  SYSTEMCTL_LOG="$TEST_LOG" \
+  CLAUDE_HISTORY_RAG_CHECKOUT_ROOT="$RUNTIME_CHECKOUT" \
+  CLAUDE_HISTORY_RAG_CREDENTIAL_HOME="$CRED_HOME" \
+  CLAUDE_HISTORY_RAG_EXTRA_WATCH_ROOTS="$EXTRA_A:$EXTRA_B" \
+  CLAUDE_HISTORY_RAG_RESET_FORWARD_CUTOFF=true \
+  GOOGLE_APPLICATION_CREDENTIALS="$WIF_ADC" \
+  CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE= \
+  CLOUDSDK_CONFIG= \
+  SPANNER_EMULATOR_HOST= \
+  CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT=production \
+  CLAUDE_HISTORY_RAG_STORAGE_BACKEND=spanner \
+  CLAUDE_HISTORY_RAG_SPANNER_PROJECT=fixture-project \
+  CLAUDE_HISTORY_RAG_SPANNER_INSTANCE=fixture-instance \
+  CLAUDE_HISTORY_RAG_SPANNER_DATABASE=fixture-database \
+  CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE=spanner \
+  CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID=ConversationEmbeddingModel \
+  CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER=vertex \
+  CLAUDE_HISTORY_RAG_EMBEDDING_MODEL=gemini-embedding-001 \
+  CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION=3072 \
+  CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST=127.0.0.1 \
+  CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT=4680 \
+  CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE=application_default \
+  CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE=workload_identity_federation \
+  CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY=fixture-agent@fixture-project.iam.gserviceaccount.com \
+  CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY=fixture-device@fixture-project.iam.gserviceaccount.com \
+  CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE=//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/workstation-pool/providers/workstation-x509 \
+  CLAUDE_HISTORY_RAG_SERVER_PSK=fixture-secret \
+  "$INSTALLER"
+
+[[ ! -e "$TEST_HOME/.claude-history-rag/forward.json" ]] || fail "installer did not reset forward.json when requested"
+require_literal "$INSTALLED_ENV" "HOME=$CRED_HOME" "isolated credential HOME in env"
+require_literal "$INSTALLED_ENV" "CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE=workload_identity_federation" "WIF profile in env"
+require_literal "$INSTALLED_ENV" "GOOGLE_APPLICATION_CREDENTIALS=$WIF_ADC" "WIF carrier in env"
+require_literal "$INSTALLED_ENV" "CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY=fixture-device@fixture-project.iam.gserviceaccount.com" "WIF base identity in env"
+require_literal "$INSTALLED_ENV" "CLAUDE_HISTORY_RAG_CREDENTIALS_AUDIENCE=//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/workstation-pool/providers/workstation-x509" "WIF audience in env"
+require_literal "$INSTALLED_UNIT" "WorkingDirectory=$RUNTIME_CHECKOUT" "checkout root in unit"
+jq -e --arg home "$TEST_HOME" --arg extra_a "$EXTRA_A" --arg extra_b "$EXTRA_B" --arg checkout "$RUNTIME_CHECKOUT" '
+  .state_dir == ($home + "/.claude-history-rag") and
+  .checkout_root == $checkout and
+  (.watch_roots | index($extra_a) != null) and
+  (.watch_roots | index($extra_b) != null) and
+  (.watch_roots | index($home + "/.claude/projects") != null)
+' "$INSTALLED_CONFIG" >/dev/null || fail "WIF, extra watch roots, credential home, or checkout root failed alignment"
+pass "installer supports WIF profile, credential home, extra watch roots, checkout root, and forward cutoff reset"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
   systemd-analyze verify "$INSTALLED_UNIT"

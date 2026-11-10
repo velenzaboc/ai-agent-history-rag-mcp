@@ -309,18 +309,25 @@ func splitContent(content string) []string {
 	}
 	parts, start := make([]string, 0), 0
 	for start < len(content) {
-		end := min(start+MaxChunkContentLength, len(content))
-		if end < len(content) {
-			regionStart := max(start, end-1000)
-			region := content[regionStart:end]
-			if at := strings.LastIndex(region, "\n\n"); at > 0 {
-				end = regionStart + at + 2
-			} else if at := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); at > 0 {
-				end = regionStart + at + 1
-			}
+		end := start + MaxChunkContentLength
+		if end >= len(content) {
+			return append(parts, content[start:])
+		}
+		regionStart := max(start, end-1000)
+		region := content[regionStart:end]
+		if at := strings.LastIndex(region, "\n\n"); at > 0 {
+			end = regionStart + at + 2
+		} else if at := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); at > 0 {
+			end = regionStart + at + 1
+		}
+		for end > start && (content[end]&0xc0) == 0x80 {
+			end--
 		}
 		parts = append(parts, content[start:end])
 		start = max(start+1, end-ChunkOverlap)
+		for start < len(content) && (content[start]&0xc0) == 0x80 {
+			start++
+		}
 	}
 	return parts
 }

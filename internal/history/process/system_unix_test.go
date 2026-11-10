@@ -44,6 +44,12 @@ func TestCurrentRecordBindsResolvedCurrentProcessIdentity(t *testing.T) {
 	if _, err := CurrentRecord(NewSystemOps(), executable+"-missing", checkout); !errors.Is(err, ErrUncertainTarget) {
 		t.Fatalf("CurrentRecord(mismatched executable) error = %v", err)
 	}
+	if _, err := CurrentRecord(NewSystemOps(), executable, checkout+"-missing"); !errors.Is(err, ErrUncertainTarget) {
+		t.Fatalf("CurrentRecord(mismatched checkout) error = %v", err)
+	}
+	if _, err := CurrentRecord(&fakeOps{snapshots: map[int]Snapshot{}}, executable, checkout); !errors.Is(err, ErrProcessNotFound) {
+		t.Fatalf("CurrentRecord(snapshot error) error = %v", err)
+	}
 }
 
 func TestSystemOpsSignalMissingProcessFailsWithoutTargetingAnotherProcess(t *testing.T) {
@@ -85,6 +91,22 @@ func TestDarwinSnapshotParsesOnlyTrustedProcessMetadata(t *testing.T) {
 	if snapshot.PID != 123 || snapshot.Executable == "" || snapshot.CheckoutRoot != resolvedCheckout || snapshot.StartIdentity != "Mon Jan 2 03:04:05 2006" {
 		t.Fatalf("darwinSnapshotFromCommands() = %#v", snapshot)
 	}
+	for _, fallbackLsof := range []string{"/usr/sbin/lsof", "/usr/bin/lsof"} {
+		commandOutput = func(name string, arguments ...string) ([]byte, error) {
+			switch name {
+			case "/bin/ps":
+				return []byte(fmt.Sprintf("Mon Jan  2 03:04:05 2006 %s\n", executable)), nil
+			case fallbackLsof:
+				return []byte("p1\nftxt\nn" + executable + "\nfcwd\nn" + resolvedCheckout + "\n"), nil
+			default:
+				return nil, fmt.Errorf("unavailable command %q", name)
+			}
+		}
+		fallbackSnap, err := systemSnapshotForOS("darwin", 123)
+		if err != nil || fallbackSnap.CheckoutRoot != resolvedCheckout {
+			t.Fatalf("darwinSnapshotFromCommands(fallback %s) = %#v, %v", fallbackLsof, fallbackSnap, err)
+		}
+	}
 	commandOutput = func(string, ...string) ([]byte, error) { return nil, errors.New("unavailable") }
 	if _, err := systemSnapshotForOS("darwin", 123); !errors.Is(err, ErrProcessNotFound) {
 		t.Fatalf("systemSnapshotForOS(darwin, ps unavailable) = %v", err)
@@ -95,6 +117,9 @@ func TestDarwinSnapshotParsesOnlyTrustedProcessMetadata(t *testing.T) {
 		},
 		"relative executable": func(command string) ([]byte, error) {
 			return []byte("Mon Jan 2 03:04:05 2006 relative-command\n"), nil
+		},
+		"missing executable target": func(command string) ([]byte, error) {
+			return []byte("Mon Jan 2 03:04:05 2006 /nonexistent-darwin-exe\n"), nil
 		},
 		"lsof unavailable": func(command string) ([]byte, error) {
 			if command == "ps" {
@@ -108,6 +133,12 @@ func TestDarwinSnapshotParsesOnlyTrustedProcessMetadata(t *testing.T) {
 			}
 			return []byte("p1\nfcwd\n"), nil
 		},
+		"lsof missing checkout target": func(command string) ([]byte, error) {
+			if command == "ps" {
+				return []byte(fmt.Sprintf("Mon Jan  2 03:04:05 2006 %s\n", executable)), nil
+			}
+			return []byte("p1\nfcwd\nn/nonexistent-darwin-checkout\n"), nil
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			commandOutput = func(command string, _ ...string) ([]byte, error) { return output(command) }
@@ -115,6 +146,9 @@ func TestDarwinSnapshotParsesOnlyTrustedProcessMetadata(t *testing.T) {
 				t.Fatalf("systemSnapshotForOS(darwin, %s) = %v", name, err)
 			}
 		})
+	}
+	if _, err := systemSnapshotForOS("linux", 999999999); !errors.Is(err, ErrProcessNotFound) {
+		t.Fatalf("systemSnapshotForOS(linux, missing) = %v", err)
 	}
 	if _, err := systemSnapshotForOS("unsupported", 123); !errors.Is(err, ErrUncertainTarget) {
 		t.Fatalf("systemSnapshotForOS(unsupported) = %v", err)
@@ -147,6 +181,15 @@ func TestLinuxSnapshotFromProcRequiresCompleteIdentity(t *testing.T) {
 	}
 	if _, err := linuxSnapshotFromProc(procRoot, pid); err == nil {
 		t.Fatal("snapshot without start identity succeeded")
+	}
+	if err := os.Mkdir(filepath.Join(base, "stat"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := linuxSnapshotFromProc(procRoot, pid); err == nil || errors.Is(err, ErrProcessNotFound) {
+		t.Fatalf("snapshot with directory stat error = %v", err)
+	}
+	if err := os.Remove(filepath.Join(base, "stat")); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(base, "stat"), []byte("123 (history-ragd"), 0o600); err != nil {
 		t.Fatal(err)
@@ -197,5 +240,24 @@ func TestLinuxSnapshotFromProcReturnsResolvedStableIdentity(t *testing.T) {
 	}
 	if snapshot != (Snapshot{PID: pid, Executable: resolvedExecutable, CheckoutRoot: resolvedCheckout, StartIdentity: "start-identity"}) {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if err := os.Remove(filepath.Join(base, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(resolvedExecutable+" (deleted)", filepath.Join(base, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	deletedSnapshot, err := linuxSnapshotFromProc(procRoot, pid)
+	if err != nil || deletedSnapshot != snapshot {
+		t.Fatalf("linuxSnapshotFromProc(deleted exe) = %#v, %v", deletedSnapshot, err)
+	}
+	if err := os.Remove(filepath.Join(base, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("relative-bin (deleted)", filepath.Join(base, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := linuxSnapshotFromProc(procRoot, pid); !errors.Is(err, ErrUncertainTarget) {
+		t.Fatalf("linuxSnapshotFromProc(relative deleted exe) = %v", err)
 	}
 }

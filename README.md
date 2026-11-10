@@ -241,12 +241,9 @@ embed credentials or PSKs in an image.
 
 ### Verification and delivery
 
-Run `scripts/verify-locally.sh` on arcserver3 through
-`python3 /home/lab/Meridian/bin/velenza-preci.py --cwd <unique-run-checkout> -- bash scripts/verify-locally.sh`.
-Use an owned NVMe workspace and caches, preserve exact-revision output, and
-clean the run's own artifacts after collecting evidence. This replaces the
-automatic CI test workflow. Tests and coverage are never dispatched to CI;
-CI is reserved for an explicitly requested deployment. Independent acceptance
-and protected pull-request provenance remain required. Native macOS service
-manager exercise remains a separately recorded platform check; this command
-makes no claim to run a macOS daemon on Linux.
+During implementation and repair, run focused local checks for touched behavior
+and direct dependencies on the working machine (any remote run uses
+`/home/lab/Meridian/bin/velenza-remote-guard.py --host <arcserver1|arcserver2|arcserver4>`,
+never `arcserver3`). When the complete submission candidate is ready and
+independent acceptance passes, `.github/workflows/ci.yml` runs the full Go,
+shell, and mutation test suite on `push`, `pull_request`, and `merge_group`.

@@ -440,3 +440,329 @@ func TestRejectDuplicateForwardKeysRejectsMalformedContainers(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardSessionIDAndPBRefusalIsolation(t *testing.T) {
+	const (
+		brainUUID    = "11111111-2222-3333-4444-555555555555"
+		subagentUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	)
+	if got := sessionIDFromPath("/root/brain/" + brainUUID + "/.system_generated/logs/transcript_full.jsonl"); got != brainUUID {
+		t.Fatalf("brain sessionIDFromPath = %q, want %q", got, brainUUID)
+	}
+	if got := sessionIDFromPath("/root/" + subagentUUID + "/subagents/agent-123.jsonl"); got != subagentUUID {
+		t.Fatalf("subagent sessionIDFromPath = %q, want %q", got, subagentUUID)
+	}
+
+	sourceRoot := t.TempDir()
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	producer, err := NewForwardProducer(Registry{MachineID: "ag-host", MaxBytes: MaxSourceSnapshotBytes}, sink, []string{sourceRoot}, time.Second, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = producer.Close() })
+
+	pbPath := filepath.Join(sourceRoot, "antigravity", brainUUID+".pb")
+	writeForwardFile(t, pbPath, []byte("legacy protobuf"))
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := loadForwardState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ExcludedSessions[brainUUID] {
+		t.Fatalf(".pb refusal poisoned ExcludedSessions[%q]", brainUUID)
+	}
+
+	future := time.Now().UTC().Add(24 * time.Hour)
+	fullPath := filepath.Join(sourceRoot, "brain", brainUUID, ".system_generated", "logs", "transcript_full.jsonl")
+	writeForwardFile(t, fullPath, coverageAntigravity(t, &future))
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.chunks) != 1 {
+		t.Fatalf("sibling transcript_full.jsonl batches = %d, want 1", len(sink.chunks))
+	}
+}
+
+func TestForwardEligibilityMetadataAndMixedExports(t *testing.T) {
+	old := time.Now().UTC().Add(-24 * time.Hour)
+	future := time.Now().UTC().Add(24 * time.Hour)
+	later := future.Add(time.Hour)
+
+	sourceRoot := t.TempDir()
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	producer, err := NewForwardProducer(Registry{MachineID: "meta-host", MaxBytes: MaxSourceSnapshotBytes}, sink, []string{sourceRoot}, time.Second, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = producer.Close() })
+
+	// 1. Claude with timestamp-less summary line + post-cutoff turn
+	claudeMeta := append(
+		[]byte(`{"type":"summary","summary":"compact summary without timestamp"}`+"\n"),
+		forwardTurn("claude-meta-session", "hello", future)...,
+	)
+	writeForwardFile(t, filepath.Join(sourceRoot, "claude", "meta.jsonl"), claudeMeta)
+
+	// 2. Codex with timestamp-less event_msg + post-cutoff turn, and refused timestamp-less response_item message
+	codexMeta := append(
+		[]byte(`{"type":"event_msg","payload":{"message":"metadata note"}}`+"\n"),
+		codexForwardSession("codex-meta-session", "ok", future, future, future, true)...,
+	)
+	writeForwardFile(t, filepath.Join(sourceRoot, "codex", "meta.jsonl"), codexMeta)
+	writeForwardFile(t, filepath.Join(sourceRoot, "codex", "refused.jsonl"), []byte(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"no time"}]}}`+"\n"))
+
+	// 3. Gemini with timestamp-less info message + post-cutoff turn, and Gemini events array
+	geminiMeta := coverageJSON(t, map[string]any{
+		"sessionId": "gemini-meta-session",
+		"messages": []any{
+			map[string]any{"id": "info-1", "type": "info", "content": "session info without timestamp"},
+			map[string]any{"id": "u-1", "type": "user", "content": "hi", "timestamp": future.Format(time.RFC3339Nano)},
+			map[string]any{"id": "g-1", "type": "gemini", "content": "hello", "timestamp": future.Format(time.RFC3339Nano)},
+		},
+	})
+	writeForwardFile(t, filepath.Join(sourceRoot, "chats", "session-meta.json"), geminiMeta)
+	geminiEvents := coverageJSON(t, []any{
+		map[string]any{"id": "ev-1", "sessionId": "gemini-events-session", "content": "event ok", "timestamp": future.Format(time.RFC3339Nano)},
+	})
+	writeForwardFile(t, filepath.Join(sourceRoot, "gemini-events", "logs.json"), geminiEvents)
+	geminiRefusedEvents := coverageJSON(t, []any{
+		map[string]any{"id": "ev-bad", "sessionId": "gemini-bad-events", "content": "no time"},
+	})
+	writeForwardFile(t, filepath.Join(sourceRoot, "gemini-bad", "logs.json"), geminiRefusedEvents)
+
+	// 4. Antigravity with timestamp-less system line + post-cutoff agent message, and refused timestamp-less agent message
+	agMeta := coverageJSONLines(t,
+		map[string]any{"id": "sys", "source": "system", "type": "system", "status": "done", "content": "init"},
+		map[string]any{"id": "msg", "source": "agent", "type": "message", "status": "done", "content": "answer", "created_at": future.Format(time.RFC3339Nano)},
+	)
+	writeForwardFile(t, filepath.Join(sourceRoot, "ag-ok", "transcript_full.jsonl"), agMeta)
+	agRefused := coverageJSONLines(t,
+		map[string]any{"id": "msg", "source": "agent", "type": "message", "status": "done", "content": "missing time"},
+	)
+	writeForwardFile(t, filepath.Join(sourceRoot, "ag-bad", "transcript_full.jsonl"), agRefused)
+
+	// 5. Mixed ChatGPT & ClaudeApp exports (1 pre-cutoff conversation + 1 post-cutoff conversation)
+	chatgptMixed := coverageJSON(t, []any{
+		map[string]any{
+			"id": "chatgpt-old-conv", "title": "Old",
+			"messages": []any{
+				map[string]any{"id": "m1", "role": "user", "content": "old q", "created_at": old.Format(time.RFC3339Nano)},
+				map[string]any{"id": "m2", "role": "assistant", "content": "old a", "created_at": old.Format(time.RFC3339Nano)},
+			},
+		},
+		map[string]any{
+			"id": "chatgpt-new-conv", "title": "New",
+			"messages": []any{
+				map[string]any{"id": "m3", "role": "user", "content": "new q", "created_at": future.Format(time.RFC3339Nano)},
+				map[string]any{"id": "m4", "role": "assistant", "content": "new a", "created_at": future.Format(time.RFC3339Nano)},
+			},
+		},
+	})
+	chatgptPath := filepath.Join(sourceRoot, "chatgpt", "conversations.json")
+	writeForwardFile(t, chatgptPath, chatgptMixed)
+
+	claudeAppMixed := coverageJSON(t, []any{
+		map[string]any{
+			"uuid": "claudeapp-old-conv", "name": "Old",
+			"chat_messages": []any{
+				map[string]any{"uuid": "m1", "sender": "human", "content": "old q", "created_at": old.Format(time.RFC3339Nano)},
+				map[string]any{"uuid": "m2", "sender": "claude", "content": "old a", "created_at": old.Format(time.RFC3339Nano)},
+			},
+		},
+		map[string]any{
+			"uuid": "claudeapp-new-conv", "name": "New",
+			"chat_messages": []any{
+				map[string]any{"uuid": "m3", "sender": "human", "content": "new q", "created_at": future.Format(time.RFC3339Nano)},
+				map[string]any{"uuid": "m4", "sender": "claude", "content": "new a", "created_at": future.Format(time.RFC3339Nano)},
+			},
+		},
+	})
+	claudeAppPath := filepath.Join(sourceRoot, "claude-app", "conversations.json")
+	writeForwardFile(t, claudeAppPath, claudeAppMixed)
+
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan metadata and mixed exports: %v", err)
+	}
+	persisted, err := loadForwardState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !persisted.ExcludedSessions["chatgpt-old-conv"] || !persisted.ExcludedSessions["claudeapp-old-conv"] {
+		t.Fatalf("old export conversations not recorded in ExcludedSessions: %#v", persisted.ExcludedSessions)
+	}
+	for _, batch := range sink.chunks {
+		for _, chunk := range batch {
+			if chunk.SessionID == "chatgpt-old-conv" || chunk.SessionID == "claudeapp-old-conv" {
+				t.Fatalf("excluded export conversation uploaded: %#v", chunk)
+			}
+			if chunk.Timestamp.Before(persisted.Cutoff) {
+				t.Fatalf("chunk timestamp %v before cutoff %v", chunk.Timestamp, persisted.Cutoff)
+			}
+		}
+	}
+
+	// Update ChatGPT export with a second new conversation; verify incremental digest filtering skips chatgpt-new-conv
+	batchesBefore := len(sink.chunks)
+	chatgptUpdated := coverageJSON(t, []any{
+		map[string]any{
+			"id": "chatgpt-old-conv", "title": "Old",
+			"messages": []any{
+				map[string]any{"id": "m1", "role": "user", "content": "old q", "created_at": old.Format(time.RFC3339Nano)},
+				map[string]any{"id": "m2", "role": "assistant", "content": "old a", "created_at": old.Format(time.RFC3339Nano)},
+			},
+		},
+		map[string]any{
+			"id": "chatgpt-new-conv", "title": "New",
+			"messages": []any{
+				map[string]any{"id": "m3", "role": "user", "content": "new q", "created_at": future.Format(time.RFC3339Nano)},
+				map[string]any{"id": "m4", "role": "assistant", "content": "new a", "created_at": future.Format(time.RFC3339Nano)},
+			},
+		},
+		map[string]any{
+			"id": "chatgpt-new-conv-2", "title": "New 2",
+			"messages": []any{
+				map[string]any{"id": "m5", "role": "user", "content": "new 2 q", "created_at": later.Format(time.RFC3339Nano)},
+				map[string]any{"id": "m6", "role": "assistant", "content": "new 2 a", "created_at": later.Format(time.RFC3339Nano)},
+			},
+		},
+	})
+	writeForwardFile(t, chatgptPath, chatgptUpdated)
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan updated ChatGPT export: %v", err)
+	}
+	if len(sink.chunks) != batchesBefore+1 || len(sink.chunks[len(sink.chunks)-1]) != 1 || sink.chunks[len(sink.chunks)-1][0].SessionID != "chatgpt-new-conv-2" {
+		t.Fatalf("incremental digest filtering failed: got %#v", sink.chunks[len(sink.chunks)-1])
+	}
+}
+
+func TestForwardReconcilesVolumeDriftSupersetRootsAndUnsafeSources(t *testing.T) {
+	root1 := t.TempDir()
+	root2 := t.TempDir()
+	// Create a hard-linked file in root1 before baselining to test baselineForwardPaths ErrUnsafeSource skip
+	hardTarget := filepath.Join(root1, "hard-target.jsonl")
+	hardLink := filepath.Join(root1, "hard-link.jsonl")
+	writeForwardFile(t, hardTarget, []byte("target\n"))
+	if err := os.Link(hardTarget, hardLink); err != nil {
+		t.Fatal(err)
+	}
+
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	registry := Registry{MachineID: "reconcile-host", MaxBytes: MaxSourceSnapshotBytes}
+	producer, err := NewForwardProducer(registry, sink, []string{root1}, time.Second, state)
+	if err != nil {
+		t.Fatalf("initial NewForwardProducer with hardlink: %v", err)
+	}
+	if err := producer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate macOS st_dev Volume drift and unsorted roots in forward.json
+	loaded, err := loadForwardState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.ExcludedPaths[filepath.Clean(hardTarget)] || !loaded.ExcludedPaths[filepath.Clean(hardLink)] {
+		t.Fatalf("hard-linked baseline paths not excluded: %#v", loaded.ExcludedPaths)
+	}
+	oldVol := loaded.Roots[0].Volume
+	fakeVol := oldVol + 999
+	loaded.Roots[0].Volume = fakeVol
+	loaded.ExcludedObjects[forwardIdentityKey(RootIdentity{Volume: fakeVol, Object: 0x1234})] = true
+	raw, err := json.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.WriteAtomic(forwardStateName, raw); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add an existing file in root2 before adding root2 as a superset watch root
+	existingRoot2 := filepath.Join(root2, "existing-in-root2.jsonl")
+	writeForwardFile(t, existingRoot2, forwardTurn("root2-baseline-session", "old", time.Now().UTC().Add(24*time.Hour)))
+
+	restarted, err := NewForwardProducer(registry, sink, []string{root2, root1}, time.Second, state)
+	if err != nil {
+		t.Fatalf("NewForwardProducer superset + volume drift: %v", err)
+	}
+	if err := restarted.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.chunks) != 0 {
+		t.Fatalf("superset root2 uploaded existing file: %d batches", len(sink.chunks))
+	}
+	reconciled, err := loadForwardState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reconciled.ExcludedPaths[filepath.Clean(existingRoot2)] {
+		t.Fatalf("superset root2 existing file was not baselined: %#v", reconciled.ExcludedPaths)
+	}
+	if !reconciled.ExcludedObjects[forwardIdentityKey(RootIdentity{Volume: oldVol, Object: 0x1234})] {
+		t.Fatalf("st_dev volume drift did not migrate ExcludedObjects: %#v", reconciled.ExcludedObjects)
+	}
+
+	// Create a new hard-linked file during runtime scan to test scanForward ErrUnsafeSource refusal
+	runtimeTarget := filepath.Join(root1, "runtime-target.jsonl")
+	runtimeLink := filepath.Join(root1, "runtime-link.jsonl")
+	writeForwardFile(t, runtimeTarget, []byte("runtime\n"))
+	if err := os.Link(runtimeTarget, runtimeLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan runtime hard-linked file: %v", err)
+	}
+	reconciled, err = loadForwardState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reconciled.ExcludedPaths[filepath.Clean(runtimeTarget)] {
+		t.Fatalf("runtime hard-linked file was not excluded: %#v", reconciled.ExcludedPaths)
+	}
+
+	// Test batchFull sentinel and transient ErrSourceChanged / fs.ErrNotExist in processForwardPath
+	freshPath := filepath.Join(root2, "fresh.jsonl")
+	writeForwardFile(t, freshPath, forwardTurn("fresh-session", "hi", time.Now().UTC().Add(24*time.Hour)))
+	root2Pinned := restarted.roots[0]
+	if root2Pinned.Path() != filepath.Clean(root2) {
+		root2Pinned = restarted.roots[1]
+	}
+	ident, err := root2Pinned.forwardSourceIdentity(filepath.Clean(freshPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := restarted.processForwardPath(context.Background(), root2Pinned, filepath.Clean(freshPath), SourceClaude, ident, restarted.forward, true); changed || !errors.Is(err, errForwardScanBatchFull) {
+		t.Fatalf("processForwardPath(batchFull=true) = %t, %v", changed, err)
+	}
+	prevSnap := snapshotForwardSource
+	snapshotForwardSource = func(*PinnedRoot, string, int64) (*Snapshot, error) {
+		return nil, ErrSourceChanged
+	}
+	if changed, err := restarted.processForwardPath(context.Background(), root2Pinned, filepath.Clean(freshPath), SourceClaude, ident, restarted.forward, false); changed || err != nil {
+		t.Fatalf("processForwardPath(ErrSourceChanged) = %t, %v", changed, err)
+	}
+	snapshotForwardSource = prevSnap
+	if err := restarted.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace root1 directory so its inode changes and verify NewForwardProducer refuses it
+	replacementRoot1 := root1 + "-replacement"
+	if err := os.MkdirAll(replacementRoot1, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(root1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacementRoot1, root1); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := NewForwardProducer(registry, sink, []string{root1, root2}, time.Second, state); err == nil {
+		_ = p.Close()
+		t.Fatal("NewForwardProducer accepted replaced root directory with changed inode")
+	}
+}

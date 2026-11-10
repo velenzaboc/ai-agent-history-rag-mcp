@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,11 +14,14 @@ import (
 )
 
 type recordingSink struct {
+	mu     sync.Mutex
 	chunks [][]store.Chunk
 	err    error
 }
 
 func (s *recordingSink) Upsert(_ context.Context, chunks []store.Chunk) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
 	}
@@ -159,5 +163,47 @@ func TestProducerBoundsRecognizedFiles(t *testing.T) {
 	t.Cleanup(func() { _ = producer.Close() })
 	if err := producer.Scan(context.Background()); !errors.Is(err, ErrScanLimit) {
 		t.Fatalf("Scan limit = %v", err)
+	}
+}
+
+func TestForwardProducerRunSurvivesTransientScanError(t *testing.T) {
+	sourceRoot := t.TempDir()
+	state, _ := openForwardState(t)
+	sink := &recordingSink{err: errors.New("transient spanner error")}
+	producer, err := NewForwardProducer(Registry{MachineID: "run-host", MaxBytes: MaxSourceSnapshotBytes}, sink, []string{sourceRoot}, 5*time.Millisecond, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = producer.Close() })
+	writeForwardFile(t, filepath.Join(sourceRoot, "live.jsonl"), forwardTurn("run-session", "hello", time.Now().UTC().Add(24*time.Hour)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- producer.Run(ctx) }()
+
+	time.Sleep(15 * time.Millisecond)
+	sink.mu.Lock()
+	sink.err = nil
+	sink.mu.Unlock()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		sink.mu.Lock()
+		n := len(sink.chunks)
+		sink.mu.Unlock()
+		if producer.Ready(context.Background()) == nil && n == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	sink.mu.Lock()
+	n := len(sink.chunks)
+	sink.mu.Unlock()
+	if err := producer.Ready(context.Background()); err != nil || n != 1 {
+		t.Fatalf("forward Run did not recover after transient error: ready=%v batches=%d", err, n)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("forward Run exit = %v, want context.Canceled", err)
 	}
 }

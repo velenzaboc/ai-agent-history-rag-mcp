@@ -72,8 +72,8 @@ const mutations = [
   {
     name: "Gemini single-row remote batch",
     file: "internal/history/store/config.go",
-    from: "if c.RemoteRPCBatch != 1 {",
-    to: "if false {",
+    from: 'bounded("remote RPC batch", c.RemoteRPCBatch, 1, 5)',
+    to: 'bounded("remote RPC batch", c.RemoteRPCBatch, 1, 64)',
   },
   {
     name: "exact document embedding task role",
@@ -126,7 +126,7 @@ const mutations = [
   {
     name: "exact remote-model affected count",
     file: "internal/history/store/store.go",
-    from: "if affected != int64(len(chunks)) {",
+    from: "if affected != int64(len(subBatch)) {",
     to: "if false {",
   },
   {

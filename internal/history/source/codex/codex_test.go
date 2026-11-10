@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestChunksGoldenSession(t *testing.T) {
@@ -104,18 +105,32 @@ func TestHelpersAndUnpairedEvents(t *testing.T) {
 	if ops := patchOperations("invalid"); ops != nil {
 		t.Fatalf("invalid patch = %#v", ops)
 	}
-	input := "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":{\"command\":\"touch created.txt\"}}}\n{\"type\":\"other\",\"payload\":{\"x\":1}}\n"
+	input := "{\"type\":\"response_item\",\"timestamp\":\"2026-09-09T12:00:00Z\",\"payload\":{\"type\":\"custom_tool_call\",\"name\":\"apply_patch\",\"input\":\"*** Add File: created.txt\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"output\":\"patched\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Agent message output\"}}\n" +
+		"{\"type\":\"compacted\",\"payload\":{\"summary\":\"Compacted session summary\"}}\n" +
+		"{\"type\":\"other\",\"payload\":{\"x\":1}}\n"
 	chunks, _, err := Chunks(strings.NewReader(input), Source{FilePath: "source.jsonl"})
-	if err != nil || len(chunks) != 3 {
+	if err != nil || len(chunks) != 6 {
 		t.Fatalf("unpaired chunks: %v %#v", err, chunks)
 	}
-	if chunks[1].ChunkType != "file_change" || chunks[1].FilePath != "created.txt" || !strings.Contains(chunks[2].Content, "\"type\":\"other\"") {
+	if chunks[1].ChunkType != "file_change" || chunks[1].FilePath != "created.txt" || !strings.Contains(chunks[2].Content, "[Tool output] patched") || !strings.Contains(chunks[3].Content, "Agent message output") || !strings.Contains(chunks[4].Content, "[Compacted summary] Compacted session summary") || !strings.Contains(chunks[5].Content, "\"type\":\"other\"") {
 		t.Fatalf("unpaired = %#v", chunks)
 	}
-	long := strings.Repeat("z", MaxChunkContentLength+20)
+	for index, chunk := range chunks {
+		if !chunk.Timestamp.Equal(time.Date(2026, time.September, 9, 12, 0, 0, 0, time.UTC)) {
+			t.Fatalf("chunk[%d] timestamp not propagated: %v", index, chunk.Timestamp)
+		}
+	}
+	long := strings.Repeat("世", 2300) + "a" + strings.Repeat("世", 1000)
 	parts := splitContent(long)
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 		t.Fatalf("parts = %d", len(parts))
+	}
+	for index, part := range parts {
+		if !utf8.ValidString(part) || len(part) > MaxChunkContentLength {
+			t.Fatalf("part[%d] invalid utf8 or length=%d", index, len(part))
+		}
 	}
 	if !eventTimestamp(Event{Line: 2}).Equal(time.Unix(0, 2000).UTC()) {
 		t.Fatal("fallback timestamp")

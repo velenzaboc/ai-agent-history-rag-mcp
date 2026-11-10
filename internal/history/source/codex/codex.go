@@ -20,7 +20,7 @@ import (
 
 const (
 	MaxFileBytes          int64 = 10 << 30
-	MaxLineBytes                = 512 << 10
+	MaxLineBytes                = 32 << 20
 	MaxJSONDepth                = 50
 	MaxChunkContentLength       = 8000
 	ChunkOverlap                = 1500
@@ -60,7 +60,7 @@ func Parse(input io.Reader, maxBytes int64) ([]Event, []Issue, error) {
 	if maxBytes < 1 || maxBytes > MaxFileBytes {
 		return nil, nil, errors.New("Codex source byte limit is invalid")
 	}
-	reader := bufio.NewReaderSize(&boundedReader{reader: input, remain: maxBytes + 1}, MaxLineBytes+1)
+	reader := bufio.NewReaderSize(&boundedReader{reader: input, remain: maxBytes + 1}, 64<<10)
 	events, issues := make([]Event, 0), make([]Issue, 0)
 	for lineNumber := 1; ; lineNumber++ {
 		line, tooLong, done, err := readLine(reader)
@@ -126,7 +126,18 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 		pending, fragments, ops = nil, nil, nil
 	}
 
+	var sessionTime time.Time
 	for _, event := range events {
+		if event.HasTime && event.Timestamp.Unix() > 1 && sessionTime.IsZero() {
+			sessionTime = event.Timestamp
+		}
+	}
+	for _, event := range events {
+		if (!event.HasTime || event.Timestamp.Unix() <= 1) && !sessionTime.IsZero() {
+			event.Timestamp, event.HasTime = sessionTime, true
+		} else if event.HasTime && event.Timestamp.Unix() > 1 {
+			sessionTime = event.Timestamp
+		}
 		payload := event.Payload
 		switch event.Type {
 		case "session_meta":
@@ -142,6 +153,14 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 			}
 			if value := stringValue(payload["model"]); value != "" {
 				model = value
+			}
+		case "compacted":
+			text := strings.TrimSpace(messageText(payload))
+			if text == "" {
+				text = jsonValue(payload)
+			}
+			if text != "" {
+				chunks = append(chunks, assistantChunks("[Compacted summary] "+text, projectPath(lastCWD, sessionCWD), sessionID, eventTimestamp(event), source, event.Line, model)...)
 			}
 		case "event_msg":
 			text := stringValue(payload["message"])
@@ -159,7 +178,7 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 			}
 		case "response_item":
 			kind := stringValue(payload["type"])
-			if kind == "message" {
+			if kind == "message" || kind == "agent_message" {
 				text := strings.TrimSpace(messageText(payload))
 				if text == "" {
 					continue
@@ -168,14 +187,12 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 				case "user":
 					finalize()
 					pending = &pendingUser{content: text, timestamp: eventTimestamp(event), line: event.Line}
-				case "assistant":
+				default:
 					if pending == nil {
 						chunks = append(chunks, assistantChunks(text, projectPath(lastCWD, sessionCWD), sessionID, eventTimestamp(event), source, event.Line, model)...)
 					} else {
 						fragments = append(fragments, text)
 					}
-				default:
-					chunks = append(chunks, assistantChunks(text, projectPath(lastCWD, sessionCWD), sessionID, eventTimestamp(event), source, event.Line, model)...)
 				}
 				continue
 			}
@@ -246,23 +263,28 @@ func parseEvent(raw []byte) (Event, string) {
 
 func summarizeTool(payload map[string]any) (string, []fileOperation) {
 	switch stringValue(payload["type"]) {
-	case "function_call":
+	case "function_call", "custom_tool_call":
 		name := stringValue(payload["name"])
 		if name == "" {
 			name = "unknown"
 		}
 		args := payload["arguments"]
+		if args == nil {
+			args = payload["input"]
+		}
 		text := stringValue(args)
 		if text == "" {
 			text = jsonValue(args)
 		}
 		ops := shellOperations(name, args)
-		if name == "apply_patch" && text != "" {
+		if (name == "apply_patch" || name == "patch") && text != "" {
 			ops = patchOperations(text)
 		}
 		return strings.TrimSpace("[Tool call] " + name + " " + text), ops
-	case "function_call_output":
+	case "function_call_output", "custom_tool_call_output":
 		return strings.TrimSpace("[Tool output] " + valueText(payload["output"])), nil
+	case "compacted":
+		return strings.TrimSpace("[Compacted summary] " + messageText(payload)), nil
 	case "web_search_call":
 		action, _ := payload["action"].(map[string]any)
 		return strings.TrimSpace("[Web search] " + stringValue(action["query"])), nil
@@ -323,11 +345,13 @@ var shellRules = []shellRule{
 }
 
 func patchOperations(arguments string) []fileOperation {
+	patch := arguments
 	var object map[string]any
-	if json.Unmarshal([]byte(arguments), &object) != nil {
+	if json.Unmarshal([]byte(arguments), &object) == nil {
+		patch = stringValue(object["patch"])
+	} else if !strings.Contains(arguments, "*** ") {
 		return nil
 	}
-	patch := stringValue(object["patch"])
 	operations := make([]fileOperation, 0)
 	for _, line := range strings.Split(patch, "\n") {
 		for _, prefix := range []struct{ prefix, kind, summary string }{{"*** Add File: ", "write", "Added file"}, {"*** Update File: ", "edit", "Updated file"}, {"*** Delete File: ", "delete", "Deleted file"}, {"*** Move to: ", "move", "Moved file"}} {
@@ -384,6 +408,14 @@ func fileChunks(ops []fileOperation, project, session string, timestamp time.Tim
 }
 
 func messageText(payload map[string]any) string {
+	for _, key := range []string{"message", "text", "summary"} {
+		if text := stringValue(payload[key]); text != "" {
+			return text
+		}
+	}
+	if text := stringValue(payload["content"]); text != "" {
+		return text
+	}
 	items, _ := payload["content"].([]any)
 	parts := make([]string, 0, len(items))
 	for _, raw := range items {
@@ -458,18 +490,25 @@ func splitContent(content string) []string {
 	}
 	parts, start := make([]string, 0), 0
 	for start < len(content) {
-		end := min(start+MaxChunkContentLength, len(content))
-		if end < len(content) {
-			regionStart := max(start, end-1000)
-			region := content[regionStart:end]
-			if at := strings.LastIndex(region, "\n\n"); at > 0 {
-				end = regionStart + at + 2
-			} else if at := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); at > 0 {
-				end = regionStart + at + 1
-			}
+		end := start + MaxChunkContentLength
+		if end >= len(content) {
+			return append(parts, content[start:])
+		}
+		regionStart := max(start, end-1000)
+		region := content[regionStart:end]
+		if at := strings.LastIndex(region, "\n\n"); at > 0 {
+			end = regionStart + at + 2
+		} else if at := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); at > 0 {
+			end = regionStart + at + 1
+		}
+		for end > start && (content[end]&0xc0) == 0x80 {
+			end--
 		}
 		parts = append(parts, content[start:end])
 		start = max(start+1, end-ChunkOverlap)
+		for start < len(content) && (content[start]&0xc0) == 0x80 {
+			start++
+		}
 	}
 	return parts
 }
@@ -505,7 +544,7 @@ func (reader *boundedReader) Read(payload []byte) (int, error) {
 	return count, err
 }
 func readLine(reader *bufio.Reader) ([]byte, bool, bool, error) {
-	line := make([]byte, 0, MaxLineBytes)
+	var line []byte
 	for {
 		fragment, err := reader.ReadSlice('\n')
 		line = append(line, fragment...)

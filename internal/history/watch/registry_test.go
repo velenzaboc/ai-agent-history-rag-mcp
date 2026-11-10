@@ -10,15 +10,42 @@ import (
 
 func TestRegistrySixSources(t *testing.T) {
 	r := Registry{}
-	cases := map[string]SourceKind{"/x/claude/a.jsonl": SourceClaude, "/x/codex/a.jsonl": SourceCodex, "/x/conversations.json": SourceChatGPT, "/x/chats/a.json": SourceGemini, "/x/transcript_full.jsonl": SourceAntigravity, "/x/claude-app/conversations.json": SourceClaudeApp}
+	cases := map[string]SourceKind{
+		"/x/claude/a.jsonl":                                                              SourceClaude,
+		"/x/codex/a.jsonl":                                                               SourceCodex,
+		"/Volumes/1TB_USB/local_codex/sessions/2026/11/09/rollout-123.jsonl":             SourceCodex,
+		"/Users/brandon/.codex/archived_sessions/abc.jsonl":                              SourceCodex,
+		"/Users/brandon/Codex/Sessions/abc.jsonl":                                        SourceCodex,
+		"/x/rollout-2026-11-09-abc.jsonl":                                                SourceCodex,
+		"/x/conversations.json":                                                          SourceChatGPT,
+		"/x/chats/a.json":                                                                SourceGemini,
+		"/Users/brandon/.gemini/tmp/hash/chats/session-2026-11-09.json":                  SourceGemini,
+		"/Users/brandon/.gemini/tmp/hash/logs.json":                                      SourceGemini,
+		"/x/transcript_full.jsonl":                                                       SourceAntigravity,
+		"/x/antigravity/legacy.pb":                                                       SourceAntigravity,
+		"/Users/brandon/.gemini/antigravity/brain/u1/.system_generated/logs/transcript_full.jsonl": SourceAntigravity,
+		"/Users/brandon/Library/Application Support/Antigravity/User/transcript_full.jsonl":        SourceAntigravity,
+		"/x/claude-app/conversations.json":                                               SourceClaudeApp,
+	}
 	for p, w := range cases {
 		g, e := r.Detect(p)
 		if e != nil || g != w {
 			t.Fatalf("%s: %s %v", p, g, e)
 		}
 	}
-	if _, e := r.Detect("/x/nope"); !errors.Is(e, ErrUnsupportedSource) {
-		t.Fatal(e)
+	unsupported := []string{
+		"/x/nope",
+		"/Users/brandon/.gemini/antigravity/brain/u1/.system_generated/logs/transcript.jsonl",
+		"/Users/brandon/.gemini/antigravity/conversations/u1.pb",
+		"/Users/brandon/Library/Application Support/Antigravity/User/state.pb",
+		"/Users/brandon/.gemini/tmp/hash/chats/notes.json",
+		"/Users/brandon/.gemini/tmp/hash/chats/session-123.txt",
+		"/x/chats/readme.txt",
+	}
+	for _, p := range unsupported {
+		if _, e := r.Detect(p); !errors.Is(e, ErrUnsupportedSource) {
+			t.Fatalf("Detect(%s) = %v, want ErrUnsupportedSource", p, e)
+		}
 	}
 	if _, e := r.Dispatch("nope", bytes.NewReader(nil), "/x"); !errors.Is(e, ErrUnsupportedSource) {
 		t.Fatal(e)

@@ -196,12 +196,15 @@ func TestDurableRandomFailuresDoNotCommitOrDiscardCandidates(t *testing.T) {
 }
 
 func TestDurableRemoveRejectsOversizedObject(t *testing.T) {
-	root, _ := openTestRoot(t)
-	payload := make([]byte, (16<<20)+1)
-	if err := root.WriteAtomic("large", payload); err != nil {
+	root, path := openTestRoot(t)
+	largePath := filepath.Join(path, "large")
+	if err := os.WriteFile(largePath, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := root.Remove("large", sha256.Sum256(payload)); removed || !errors.Is(err, ErrReadLimit) {
+	if err := os.Truncate(largePath, (128<<20)+1); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := root.Remove("large", [32]byte{}); removed || !errors.Is(err, ErrReadLimit) {
 		t.Fatalf("Remove(large) = %v, %v", removed, err)
 	}
 }

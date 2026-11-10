@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestChunksGoldenSession(t *testing.T) {
@@ -35,6 +36,9 @@ func TestChunksGoldenSession(t *testing.T) {
 	if !strings.Contains(chunks[0].Content, "Session saved") || !strings.Contains(chunks[1].Content, "\"type\":\"custom\"") {
 		t.Fatalf("events=%#v %#v", chunks[0], chunks[1])
 	}
+	if !chunks[1].Timestamp.Equal(time.Date(2026, time.September, 9, 12, 0, 2, 0, time.UTC)) {
+		t.Fatalf("expected propagated session timestamp on custom message, got %v", chunks[1].Timestamp)
+	}
 	turn := chunks[2]
 	want := "In project project-hash, user asked:\nFix the loader\n\nAssistant responded:\nI updated it.\n\nThoughts:\nInspect source\n\nTool calls:\n{\"args\":{\"patch\":\"*** Update File: loader.go\\n*** Add File: loader_test.go\"},\"id\":\"call1\",\"name\":\"apply_patch\",\"resultDisplay\":\"\"}"
 	if turn.Content != want || turn.SessionID != "gemini-session-1" || turn.ProjectPath != "/gemini/project-hash" || turn.Model != "gemini-2.5" || turn.SourceLine != 1 || turn.MachineID != "mac" {
@@ -56,7 +60,7 @@ func TestLogsIsolationAndBounds(t *testing.T) {
 		t.Fatalf("logs=%#v issues=%#v err=%v", document, issues, err)
 	}
 	chunks, _, err := Chunks(strings.NewReader(logs), Source{FilePath: "/logs.json"})
-	if err != nil || len(chunks) != 2 || chunks[0].SessionID != "s" || chunks[1].SessionID != "gemini-logs" {
+	if err != nil || len(chunks) != 2 || chunks[0].SessionID != "s" || chunks[1].SessionID != "gemini-logs" || !chunks[1].Timestamp.Equal(chunks[0].Timestamp) {
 		t.Fatalf("log chunks=%#v err=%v", chunks, err)
 	}
 	deep := strings.Repeat("{\"x\":", MaxJSONDepth+2) + "0" + strings.Repeat("}", MaxJSONDepth+2)
@@ -99,8 +103,18 @@ func TestHelpers(t *testing.T) {
 	if _, _, err := Chunks(strings.NewReader("[]"), Source{}); err == nil {
 		t.Fatal("provenance")
 	}
-	if len(splitContent(strings.Repeat("x", MaxChunkContentLength+20))) < 2 {
+	parts := splitContent(strings.Repeat("世", 2300) + "a" + strings.Repeat("世", 1000))
+	if len(parts) < 2 {
 		t.Fatal("split")
+	}
+	for i, part := range parts {
+		if !utf8.ValidString(part) || len(part) > MaxChunkContentLength {
+			t.Fatalf("part[%d] invalid utf8 or length=%d", i, len(part))
+		}
+	}
+	propagated, _, err := Chunks(strings.NewReader(`{"sessionId":"s1","messages":[{"id":"m1","type":"info","content":"first"},{"id":"m2","type":"info","timestamp":"2026-09-09T12:00:05Z","content":"second"}]}`), Source{FilePath: "/tmp/p/chats/s.json"})
+	if err != nil || len(propagated) != 2 || !propagated[0].Timestamp.Equal(time.Date(2026, time.September, 9, 12, 0, 5, 0, time.UTC)) {
+		t.Fatalf("propagated=%#v err=%v", propagated, err)
 	}
 	if _, _, err := Parse(failingReader{}, 10); err == nil || !strings.Contains(err.Error(), "read Gemini source") {
 		t.Fatalf("read=%v", err)

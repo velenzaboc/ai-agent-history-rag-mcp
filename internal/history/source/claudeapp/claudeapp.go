@@ -17,6 +17,7 @@ const (
 	MaxFileBytes          int64 = 10 << 30
 	MaxJSONDepth                = 50
 	MaxChunkContentLength       = 8000
+	ChunkOverlap                = 1500
 )
 
 var errLarge = errors.New("Claude App export too large")
@@ -27,14 +28,16 @@ type Source struct {
 }
 type Issue struct{ Conversation, Message, Reason string }
 type Conversation struct {
-	ID, Title string
-	Messages  []Message
+	ID, Title                                         string
+	PostTurnSummary, LastTurnReport, SideSessionNotes string
+	Messages                                          []Message
 }
 type Message struct {
-	ID, Role, Author, Content string
-	Artifacts, Tools          []string
-	Timestamp                 time.Time
-	HasTime                   bool
+	ID, Role, Author, Content                         string
+	PostTurnSummary, LastTurnReport, SideSessionNotes string
+	Artifacts, Tools                                  []string
+	Timestamp                                         time.Time
+	HasTime                                           bool
 }
 
 func Parse(input io.Reader, max int64) ([]Conversation, []Issue, error) {
@@ -72,7 +75,13 @@ func Parse(input io.Reader, max int64) ([]Conversation, []Issue, error) {
 			issues = append(issues, Issue{fmt.Sprint(i + 1), "", "conversation_not_object"})
 			continue
 		}
-		c := Conversation{first(text(o["uuid"]), text(o["id"]), text(o["conversation_id"]), fmt.Sprint(i+1)), first(text(o["name"]), text(o["title"]), "Untitled"), nil}
+		c := Conversation{
+			ID:               first(text(o["uuid"]), text(o["id"]), text(o["conversation_id"]), fmt.Sprint(i+1)),
+			Title:            first(text(o["name"]), text(o["title"]), "Untitled"),
+			PostTurnSummary:  first(value(o["postTurnSummary"]), value(o["post_turn_summary"])),
+			LastTurnReport:   first(value(o["lastTurnReport"]), value(o["last_turn_report"])),
+			SideSessionNotes: first(value(o["sideSessionNotes"]), value(o["side_session_notes"])),
+		}
 		messages, _ := o["chat_messages"].([]any)
 		if messages == nil {
 			messages, _ = o["messages"].([]any)
@@ -99,9 +108,29 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 	}
 	out := []store.Chunk{}
 	for ci, c := range cs {
+		var convTime time.Time
+		for _, m := range c.Messages {
+			if m.HasTime && m.Timestamp.Unix() > 1 && convTime.IsZero() {
+				convTime = m.Timestamp
+			}
+		}
+		if notes := extraNotes(c.PostTurnSummary, c.LastTurnReport, c.SideSessionNotes); notes != "" {
+			at := convTime
+			if at.IsZero() {
+				at = time.Unix(0, int64((ci+1)*100000)*1000).UTC()
+			}
+			out = append(out, makeChunks("Session summary for Claude app conversation "+c.Title+":\n"+notes, "summary", c.ID, at, "", "", source, (ci+1)*100000)...)
+		}
 		var u *Message
 		for mi := range c.Messages {
 			m := c.Messages[mi]
+			if extra := extraNotes(m.PostTurnSummary, m.LastTurnReport, m.SideSessionNotes); extra != "" {
+				if m.Content != "" {
+					m.Content += "\n\n" + extra
+				} else {
+					m.Content = extra
+				}
+			}
 			if m.Content == "" {
 				continue
 			}
@@ -114,15 +143,84 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 					at = u.Timestamp
 				}
 				if at.IsZero() {
+					at = convTime
+				}
+				if at.IsZero() {
 					at = time.Unix(0, int64((ci+1)*100000+mi+1)*1000).UTC()
 				}
 				content := "In Claude app conversation " + c.Title + ", user asked:\n" + u.Content + "\n\nClaude responded:\n" + m.Content
-				out = append(out, store.Chunk{ID: id(content, c.ID, key(at)), Content: content, ChunkType: "turn", SessionID: c.ID, ProjectPath: "/claude-app/export", ProjectName: "Claude App", Timestamp: at, UserUUID: u.ID, AssistantUUID: m.ID, SourceFile: source.FilePath, SourceLine: int64((ci+1)*100000 + mi + 1), MachineID: source.MachineID})
+				out = append(out, makeChunks(content, "turn", c.ID, at, u.ID, m.ID, source, (ci+1)*100000+mi+1)...)
 				u = nil
+			} else if m.PostTurnSummary != "" || m.LastTurnReport != "" || m.SideSessionNotes != "" {
+				at := m.Timestamp
+				if !m.HasTime {
+					at = convTime
+				}
+				if at.IsZero() {
+					at = time.Unix(0, int64((ci+1)*100000+mi+1)*1000).UTC()
+				}
+				out = append(out, makeChunks("In Claude app conversation "+c.Title+":\n"+m.Content, "summary", c.ID, at, "", m.ID, source, (ci+1)*100000+mi+1)...)
 			}
 		}
 	}
 	return out, is, nil
+}
+func extraNotes(post, report, notes string) string {
+	var parts []string
+	if post != "" {
+		parts = append(parts, "Post-turn summary:\n"+post)
+	}
+	if report != "" {
+		parts = append(parts, "Last turn report:\n"+report)
+	}
+	if notes != "" {
+		parts = append(parts, "Side session notes:\n"+notes)
+	}
+	return strings.Join(parts, "\n\n")
+}
+func makeChunks(content, kind, session string, at time.Time, userID, assistantID string, source Source, line int) []store.Chunk {
+	parts, base := splitContent(content), id(content, session, key(at))
+	chunks := make([]store.Chunk, 0, len(parts))
+	for i, part := range parts {
+		chunkID, parent := base, ""
+		if len(parts) > 1 {
+			part = fmt.Sprintf("[Part %d/%d] %s", i+1, len(parts), part)
+			chunkID = id(part, session, key(at)+fmt.Sprintf("_part%d", i+1))
+			if i > 0 {
+				parent = base
+			}
+		}
+		chunks = append(chunks, store.Chunk{ID: chunkID, Content: part, ChunkType: kind, SessionID: session, ProjectPath: "/claude-app/export", ProjectName: "Claude App", Timestamp: at, UserUUID: userID, AssistantUUID: assistantID, SourceFile: source.FilePath, SourceLine: int64(line), ParentChunkID: parent, MachineID: source.MachineID})
+	}
+	return chunks
+}
+func splitContent(content string) []string {
+	if len(content) <= MaxChunkContentLength {
+		return []string{content}
+	}
+	parts, start := make([]string, 0), 0
+	for start < len(content) {
+		end := start + MaxChunkContentLength
+		if end >= len(content) {
+			return append(parts, content[start:])
+		}
+		regionStart := max(start, end-1000)
+		region := content[regionStart:end]
+		if at := strings.LastIndex(region, "\n\n"); at > 0 {
+			end = regionStart + at + 2
+		} else if at := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); at > 0 {
+			end = regionStart + at + 1
+		}
+		for end > start && (content[end]&0xc0) == 0x80 {
+			end--
+		}
+		parts = append(parts, content[start:end])
+		start = max(start+1, end-ChunkOverlap)
+		for start < len(content) && (content[start]&0xc0) == 0x80 {
+			start++
+		}
+	}
+	return parts
 }
 func convos(v any) ([]any, bool) {
 	if a, ok := v.([]any); ok {
@@ -140,7 +238,15 @@ func message(v any, i int) (Message, bool) {
 		return Message{}, false
 	}
 	r, a := role(o)
-	m := Message{ID: first(text(o["uuid"]), text(o["id"]), text(o["message_id"]), fmt.Sprint(i)), Role: r, Author: a, Content: content(o)}
+	m := Message{
+		ID:               first(text(o["uuid"]), text(o["id"]), text(o["message_id"]), fmt.Sprint(i)),
+		Role:             r,
+		Author:           a,
+		Content:          content(o),
+		PostTurnSummary:  first(value(o["postTurnSummary"]), value(o["post_turn_summary"])),
+		LastTurnReport:   first(value(o["lastTurnReport"]), value(o["last_turn_report"])),
+		SideSessionNotes: first(value(o["sideSessionNotes"]), value(o["side_session_notes"])),
+	}
 	m.Timestamp, m.HasTime = stamp(first(text(o["created_at"]), text(o["createdAt"]), text(o["timestamp"])))
 	for _, k := range []string{"artifacts", "tool_uses", "tools"} {
 		if a, ok := o[k].([]any); ok {

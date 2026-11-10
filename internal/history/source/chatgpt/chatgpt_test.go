@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestParseAndChunksGoldenExport(t *testing.T) {
@@ -97,9 +98,15 @@ func TestHelpersAndChunkParts(t *testing.T) {
 	if _, _, err := Chunks(strings.NewReader("[]"), Source{}); err == nil {
 		t.Fatal("missing provenance")
 	}
-	long := strings.Repeat("x", MaxChunkContentLength+20)
-	if len(splitContent(long)) < 2 {
+	long := strings.Repeat("世", 2300) + "a" + strings.Repeat("世", 1000)
+	parts := splitContent(long)
+	if len(parts) < 2 {
 		t.Fatal("content should split")
+	}
+	for i, part := range parts {
+		if !utf8.ValidString(part) || len(part) > MaxChunkContentLength {
+			t.Fatalf("part[%d] invalid utf8 or length=%d", i, len(part))
+		}
 	}
 	if chunkID("a", "b", "c") != chunkID("a", "b", "c") || chunkID("a", "b", "c") == chunkID("a", "b", "d") {
 		t.Fatal("chunk id")
