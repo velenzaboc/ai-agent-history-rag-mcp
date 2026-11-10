@@ -126,8 +126,24 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 	}
 	projectPath, projectName := projectFromPath(source.FilePath)
 	chunks := make([]store.Chunk, 0)
+	var sessionTime time.Time
+	for _, event := range document.Events {
+		if event.HasTime && event.Timestamp.Unix() > 1 && sessionTime.IsZero() {
+			sessionTime = event.Timestamp
+		}
+	}
+	for _, message := range document.Messages {
+		if message.HasTime && message.Timestamp.Unix() > 1 && sessionTime.IsZero() {
+			sessionTime = message.Timestamp
+		}
+	}
 	if len(document.Events) > 0 {
 		for index, event := range document.Events {
+			if (!event.HasTime || event.Timestamp.Unix() <= 1) && !sessionTime.IsZero() {
+				event.Timestamp, event.HasTime = sessionTime, true
+			} else if event.HasTime && event.Timestamp.Unix() > 1 {
+				sessionTime = event.Timestamp
+			}
 			session := firstNonEmpty(event.SessionID, "gemini-logs")
 			chunks = append(chunks, assistantChunks(event.Content, projectPath, projectName, session, timestamp(event.Timestamp, event.HasTime, index+1), source, index+1, "")...)
 		}
@@ -159,6 +175,11 @@ func Chunks(input io.Reader, source Source) ([]store.Chunk, []Issue, error) {
 		ops = nil
 	}
 	for index, message := range document.Messages {
+		if (!message.HasTime || message.Timestamp.Unix() <= 1) && !sessionTime.IsZero() {
+			message.Timestamp, message.HasTime = sessionTime, true
+		} else if message.HasTime && message.Timestamp.Unix() > 1 {
+			sessionTime = message.Timestamp
+		}
 		at := timestamp(message.Timestamp, message.HasTime, index+1)
 		switch message.Type {
 		case "user":
@@ -401,18 +422,25 @@ func splitContent(content string) []string {
 	}
 	parts, start := make([]string, 0), 0
 	for start < len(content) {
-		end := min(start+MaxChunkContentLength, len(content))
-		if end < len(content) {
-			regionStart := max(start, end-1000)
-			region := content[regionStart:end]
-			if at := strings.LastIndex(region, "\n\n"); at > 0 {
-				end = regionStart + at + 2
-			} else if at := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); at > 0 {
-				end = regionStart + at + 1
-			}
+		end := start + MaxChunkContentLength
+		if end >= len(content) {
+			return append(parts, content[start:])
+		}
+		regionStart := max(start, end-1000)
+		region := content[regionStart:end]
+		if at := strings.LastIndex(region, "\n\n"); at > 0 {
+			end = regionStart + at + 2
+		} else if at := max(strings.LastIndex(region, ". "), strings.LastIndex(region, "! "), strings.LastIndex(region, "? "), strings.LastIndex(region, "\n")); at > 0 {
+			end = regionStart + at + 1
+		}
+		for end > start && (content[end]&0xc0) == 0x80 {
+			end--
 		}
 		parts = append(parts, content[start:end])
 		start = max(start+1, end-ChunkOverlap)
+		for start < len(content) && (content[start]&0xc0) == 0x80 {
+			start++
+		}
 	}
 	return parts
 }

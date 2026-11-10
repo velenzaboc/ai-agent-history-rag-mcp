@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestGolden(t *testing.T) {
@@ -52,5 +53,34 @@ func TestBounds(t *testing.T) {
 	}
 	if !time.Unix(0, 0).Equal(time.Unix(0, 0)) {
 		t.Fatal("time")
+	}
+	exportWithNotes := `{"conversations":[{"uuid":"c-notes","name":"Notes Convo","postTurnSummary":"convo summary","lastTurnReport":"convo report","sideSessionNotes":"convo side notes","chat_messages":[{"uuid":"u1","sender":"human","text":"hello"},{"uuid":"a1","sender":"claude","text":"world","postTurnSummary":"turn summary","lastTurnReport":"turn report","sideSessionNotes":"turn notes"},{"uuid":"s1","sender":"system","postTurnSummary":"standalone note"}]}]}`
+	chunks, issues, err := Chunks(strings.NewReader(exportWithNotes), Source{FilePath: "/x/conversations.json", MachineID: "mac"})
+	if err != nil || len(issues) != 0 || len(chunks) != 3 {
+		t.Fatalf("notes chunks=%#v issues=%#v err=%v", chunks, issues, err)
+	}
+	if chunks[0].ChunkType != "summary" || !strings.Contains(chunks[0].Content, "convo summary") || !strings.Contains(chunks[0].Content, "convo report") || !strings.Contains(chunks[0].Content, "convo side notes") {
+		t.Fatalf("convo summary chunk=%#v", chunks[0])
+	}
+	if chunks[1].ChunkType != "turn" || !strings.Contains(chunks[1].Content, "turn summary") || !strings.Contains(chunks[1].Content, "turn report") || !strings.Contains(chunks[1].Content, "turn notes") {
+		t.Fatalf("turn notes chunk=%#v", chunks[1])
+	}
+	if chunks[2].ChunkType != "summary" || !strings.Contains(chunks[2].Content, "standalone note") {
+		t.Fatalf("standalone note chunk=%#v", chunks[2])
+	}
+	longUTF8 := strings.Repeat("世", 2300) + "a" + strings.Repeat("世", 1000)
+	parts := splitContent(longUTF8)
+	if len(parts) < 2 {
+		t.Fatal("expected split parts")
+	}
+	for i, part := range parts {
+		if !utf8.ValidString(part) || len(part) > MaxChunkContentLength {
+			t.Fatalf("part[%d] invalid utf8 or length=%d", i, len(part))
+		}
+	}
+	splitExport := `[{"uuid":"c-long","name":"Long","chat_messages":[{"uuid":"u1","sender":"human","created_at":"2026-09-09T12:00:00Z","text":"q"},{"uuid":"a1","sender":"claude","text":"` + longUTF8 + `"}]}]`
+	longChunks, _, err := Chunks(strings.NewReader(splitExport), Source{FilePath: "/x/conversations.json"})
+	if err != nil || len(longChunks) != 2 || longChunks[1].ParentChunkID == "" {
+		t.Fatalf("longChunks=%#v err=%v", longChunks, err)
 	}
 }

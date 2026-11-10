@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/velenzaboc/ai-agent-history-rag-mcp/internal/history/store"
 )
@@ -116,6 +117,44 @@ func TestContentToolOperationsAndSplittingAreStable(t *testing.T) {
 	}
 	if _, _, err := Chunks(strings.NewReader(""), Source{}); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("Chunks source identity error = %v", err)
+	}
+	utf8Parts := splitContent(strings.Repeat("世", 2300) + "a" + strings.Repeat("世", 1000))
+	if len(utf8Parts) < 2 {
+		t.Fatal("expected utf8 split")
+	}
+	for index, part := range utf8Parts {
+		if !utf8.ValidString(part) || len(part) > MaxChunkContentLength {
+			t.Fatalf("utf8Parts[%d] invalid or too long: %d", index, len(part))
+		}
+	}
+	enhancedInput := strings.Join([]string{
+		`{"type":"custom-title","customTitle":"Fix Claude Parser"}`,
+		`{"type":"agent-name","agentName":"VOLT-ENGINEER"}`,
+		`{"type":"user","uuid":"u1","message":{"role":"user","content":"Check PR"}}`,
+		`{"type":"assistant","uuid":"a1","timestamp":"2026-09-09T15:00:00Z","message":{"role":"assistant","model":"claude-4","content":[{"type":"text","text":"Linked."}]}}`,
+		`{"type":"pr-link","prNumber":42,"prUrl":"https://github.com/velenzaboc/repo/pull/42","prRepository":"velenzaboc/repo"}`,
+	}, "\n") + "\n"
+	subagentSource := Source{
+		FilePath:  "/Users/brandon/.claude/projects/-Volumes-1TB_USB-Meridian/98894181-8dac-44cf-b3b5-c9158018b1ce/subagents/agent-1.jsonl",
+		MachineID: "macmini",
+	}
+	enhancedChunks, enhancedIssues, err := Chunks(strings.NewReader(enhancedInput), subagentSource)
+	if err != nil || len(enhancedIssues) != 0 || len(enhancedChunks) != 3 {
+		t.Fatalf("enhancedChunks=%#v issues=%#v err=%v", enhancedChunks, enhancedIssues, err)
+	}
+	for index, chunk := range enhancedChunks {
+		if chunk.ProjectPath != "/Volumes/1TB_USB/Meridian" || chunk.ProjectName != "Meridian" || chunk.SessionID != "98894181-8dac-44cf-b3b5-c9158018b1ce" {
+			t.Fatalf("enhancedChunks[%d] metadata=%#v", index, chunk)
+		}
+		if !chunk.Timestamp.Equal(time.Date(2026, time.September, 9, 15, 0, 0, 0, time.UTC)) {
+			t.Fatalf("enhancedChunks[%d] timestamp=%v", index, chunk.Timestamp)
+		}
+	}
+	if enhancedChunks[0].ChunkType != "summary" || !strings.Contains(enhancedChunks[0].Content, "Fix Claude Parser / VOLT-ENGINEER") {
+		t.Fatalf("summary chunk=%#v", enhancedChunks[0])
+	}
+	if !strings.Contains(enhancedChunks[2].Content, "#42") || !strings.Contains(enhancedChunks[2].Content, "velenzaboc/repo") || !strings.Contains(enhancedChunks[2].Content, "https://github.com/velenzaboc/repo/pull/42") {
+		t.Fatalf("pr-link chunk=%#v", enhancedChunks[2])
 	}
 }
 
