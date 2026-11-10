@@ -63,6 +63,7 @@ func TestRunUsesForwardProducerForProductionWatchRoots(t *testing.T) {
 	if err := os.WriteFile(configPath, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	slices.Sort(roots)
 
 	previousStore := newProductionStore
 	newProductionStore = func(context.Context, func(string) string) (daemonStore, error) {

@@ -34,19 +34,31 @@ type Registry struct {
 
 func (r Registry) Detect(path string) (SourceKind, error) {
 	base := filepath.Base(path)
+	lowerBase := strings.ToLower(base)
 	clean := filepath.ToSlash(path)
+	lower := strings.ToLower(clean)
 	switch {
-	case base == "conversations.json" && strings.Contains(clean, "claude-app"):
+	case base == "conversations.json" && strings.Contains(lower, "claude-app"):
 		return SourceClaudeApp, nil
 	case base == "conversations.json":
 		return SourceChatGPT, nil
-	case base == "transcript_full.jsonl" || strings.HasSuffix(base, ".pb"):
+	case strings.Contains(lower, "/.gemini/antigravity/") || strings.Contains(lower, "/antigravity/user/"):
+		if base == "transcript_full.jsonl" {
+			return SourceAntigravity, nil
+		}
+		return "", ErrUnsupportedSource
+	case base == "transcript_full.jsonl" || strings.HasSuffix(lowerBase, ".pb"):
 		return SourceAntigravity, nil
-	case base == "logs.json" || strings.Contains(clean, "/chats/"):
+	case strings.Contains(lower, "/.gemini/tmp/"):
+		if base == "logs.json" || (strings.Contains(lower, "/chats/") && strings.HasPrefix(lowerBase, "session-") && strings.HasSuffix(lowerBase, ".json")) {
+			return SourceGemini, nil
+		}
+		return "", ErrUnsupportedSource
+	case base == "logs.json" || (strings.Contains(lower, "/chats/") && strings.HasSuffix(lowerBase, ".json")):
 		return SourceGemini, nil
-	case strings.HasSuffix(base, ".jsonl") && strings.Contains(clean, "codex"):
+	case strings.HasSuffix(lowerBase, ".jsonl") && (strings.Contains(lower, "codex") || strings.Contains(lower, "/archived_sessions/") || strings.HasPrefix(lowerBase, "rollout-")):
 		return SourceCodex, nil
-	case strings.HasSuffix(base, ".jsonl"):
+	case strings.HasSuffix(lowerBase, ".jsonl"):
 		return SourceClaude, nil
 	}
 	return "", ErrUnsupportedSource
