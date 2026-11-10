@@ -120,4 +120,14 @@ func TestReadOnlyWorkloadSelectorBindsDirectServiceIdentityAndAudience(t *testin
 	if _, err := LoadProduction(func(k string) string { return env[k] }); err == nil {
 		t.Fatal("shared host base accepted")
 	}
+	delete(env, "CLAUDE_HISTORY_RAG_READ_ONLY")
+	env["CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT"] = "4680"
+	twoHopCfg, err := LoadProduction(func(k string) string { return env[k] })
+	if err != nil || twoHopCfg.ReadOnly || twoHopCfg.GoogleCredentials.CredentialsBaseIdentity != "host-controller@fixture-project.iam.gserviceaccount.com" {
+		t.Fatalf("2-hop write workload config=%+v err=%v", twoHopCfg, err)
+	}
+	env["CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY"] = testIdentity
+	if _, err := LoadProduction(func(k string) string { return env[k] }); err == nil {
+		t.Fatal("self-impersonating workload base identity accepted")
+	}
 }

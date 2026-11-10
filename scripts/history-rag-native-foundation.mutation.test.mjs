@@ -68,8 +68,8 @@ const mutations = [
   {
     name: "authorized-user source constraint",
     file: "internal/gcpauth/selector.go",
-    from: 'if sourceType, _ := source["type"].(string); sourceType != "authorized_user" {',
-    to: 'if sourceType, _ := source["type"].(string); sourceType == "authorized_user" {',
+    from: 'case "authorized_user":',
+    to: 'case "unsupported_source":',
   },
   {
     name: "static credential environment rejection",
@@ -110,8 +110,8 @@ const mutations = [
   {
     name: "loopback status port fence",
     file: "internal/runtimeconfig/config.go",
-    from: "if c.StatusServerPort != ProductionStatusServerPort {",
-    to: "if false {",
+    from: "if c.StatusServerPort != wantPort {",
+    to: "if false && c.StatusServerPort != wantPort {",
   },
   {
     name: "x/sys fleet floor",

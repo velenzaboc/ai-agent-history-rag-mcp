@@ -299,7 +299,7 @@ func productionStoreConfig(runtime runtimeconfig.Config) store.Config {
 		EmbeddingDimension:         store.VectorDimension,
 		DocumentTaskType:           store.TaskRetrievalDocument,
 		QueryTaskType:              store.TaskRetrievalQuery,
-		RemoteRPCBatch:             1,
+		RemoteRPCBatch:             5,
 		EnableFullText:             true,
 		EnableANN:                  true,
 		UseANN:                     true,
