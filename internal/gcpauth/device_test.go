@@ -84,3 +84,64 @@ func TestDeviceSourceUsesExactExistingNestedIdentityWithoutCarrierMutation(t *te
 		t.Fatal("target mistaken for source identity")
 	}
 }
+
+func TestDeviceTokenSourceResolvesKopiaBackupCarrierForServiceAccountAndX509(t *testing.T) {
+	f := newWorkloadFixture(t)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	if err := os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS"); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	backupDir := filepath.Join(home, ".config", "no13-backup")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Direct service_account carrier in ~/.config/no13-backup/kopia-macmini.json
+	saEmail := "kopia-macmini@jeeves-486102.iam.gserviceaccount.com"
+	saRaw, err := deviceSourceConfiguration([]byte(deviceSourceCarrier(testIdentity)), "device-source@fixture-project.iam.gserviceaccount.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saJSON := strings.ReplaceAll(string(saRaw), "device-source@fixture-project.iam.gserviceaccount.com", saEmail)
+	saJSON = strings.ReplaceAll(saJSON, "fixture-project", "jeeves-486102")
+	saPath := filepath.Join(backupDir, "kopia-macmini.json")
+	writeWorkloadBytes(t, saPath, []byte(saJSON))
+	restrictTestFileAccess(t, saPath)
+
+	saSelector := Selector{
+		CredentialsSource:   CredentialsSourceApplicationDefault,
+		CredentialsProfile:  CredentialsProfileDeviceServiceAccount,
+		CredentialsIdentity: saEmail,
+	}
+	if _, err := saSelector.TokenSource(context.Background()); err != nil {
+		t.Fatalf("direct kopia service_account carrier rejected: %v", err)
+	}
+	saSelector.CredentialsIdentity = "kopia-macbook@jeeves-486102.iam.gserviceaccount.com"
+	if _, err := saSelector.TokenSource(context.Background()); err == nil {
+		t.Fatal("mismatched kopia service_account identity accepted")
+	}
+
+	// 2. Direct external_account X.509 carrier in ~/.config/no13-backup/kopia-arcserver1.json
+	wifEmail := "kopia-arcserver1@jeeves-486102.iam.gserviceaccount.com"
+	f.carrier["service_account_impersonation_url"] = "https://iamcredentials.mtls.googleapis.com/v1/projects/-/serviceAccounts/" + wifEmail + ":generateAccessToken"
+	wifPath := filepath.Join(backupDir, "kopia-arcserver1.json")
+	writeWorkloadJSON(t, wifPath, f.carrier)
+	restrictTestFileAccess(t, wifPath)
+
+	wifSelector := Selector{
+		CredentialsSource:   CredentialsSourceApplicationDefault,
+		CredentialsProfile:  CredentialsProfileDeviceServiceAccount,
+		CredentialsIdentity: wifEmail,
+	}
+	if _, err := wifSelector.TokenSource(context.Background()); err != nil {
+		t.Fatalf("direct kopia external_account X.509 carrier rejected: %v", err)
+	}
+	f.carrier["service_account_impersonation_url"] = "https://iamcredentials.mtls.googleapis.com/v1/projects/-/serviceAccounts/kopia-arcserver4@jeeves-486102.iam.gserviceaccount.com:generateAccessToken"
+	writeWorkloadJSON(t, wifPath, f.carrier)
+	restrictTestFileAccess(t, wifPath)
+	if _, err := wifSelector.TokenSource(context.Background()); err == nil {
+		t.Fatal("mismatched kopia external_account identity accepted")
+	}
+}

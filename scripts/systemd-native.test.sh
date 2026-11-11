@@ -31,6 +31,7 @@ for literal in \
   'ProtectSystem=strict' \
   'ProtectHome=read-only' \
   'UMask=0077' \
+  'UnsetEnvironment=CLOUDSDK_CONFIG CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE GOOGLE_API_CERTIFICATE_CONFIG GOOGLE_APPLICATION_CREDENTIALS' \
   'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6'; do
   require_literal "$UNIT_TEMPLATE" "$literal" "native unit contract"
 done
@@ -120,9 +121,11 @@ require_literal "$INSTALLED_UNIT" "ExecStart=$TEST_BIN supervise --config $INSTA
 require_literal "$INSTALLED_UNIT" 'ReadWritePaths='"$TEST_HOME/.claude-history-rag" "installed unit state boundary"
 require_literal "$INSTALLED_CONFIG" '"listen": "127.0.0.1:4680"' "host loopback config"
 require_literal "$INSTALLED_CONFIG" '"auth_enabled": true' "authenticated config"
+require_literal "$INSTALLED_CONFIG" '"read_only": false' "collector read_only config"
 jq -e --arg home "$TEST_HOME" '
   .listen == "127.0.0.1:4680" and
   .auth_enabled == true and
+  .read_only == false and
   .watch_roots == [
     ($home + "/.claude-history-rag/imports/chatgpt"),
     ($home + "/.claude-history-rag/imports/claude-app"),
@@ -143,6 +146,34 @@ require_absent "$INSTALLED_ENV" 'GOOGLE_APPLICATION_CREDENTIALS|SPANNER_EMULATOR
 require_literal "$TEST_LOG" '--user daemon-reload' "systemctl reload"
 require_literal "$TEST_LOG" '--user enable --now ai-agent-history-rag' "systemctl enable"
 pass "installer writes protected loopback-only production unit with nine pre-created sorted roots"
+
+# Exercise default workstation derivation (only CLAUDE_HISTORY_RAG_SERVER_PSK required)
+# and mapped ~/Meridian checkout preservation.
+MAPPED_STORAGE="$TMP_DIR/meridian-storage"
+mkdir -p "$MAPPED_STORAGE/repos/ai-agent-history-rag-mcp/bin"
+cp -R "$ROOT_DIR/scripts" "$MAPPED_STORAGE/repos/ai-agent-history-rag-mcp/scripts"
+cp "$TEST_BIN" "$MAPPED_STORAGE/repos/ai-agent-history-rag-mcp/bin/history-ragd"
+chmod 700 "$MAPPED_STORAGE/repos/ai-agent-history-rag-mcp/bin/history-ragd"
+ln -sfn "$MAPPED_STORAGE" "$TEST_HOME/Meridian"
+env \
+  HOME="$TEST_HOME" \
+  XDG_CONFIG_HOME="$TEST_HOME/.config" \
+  SYSTEMCTL_BIN="$TEST_SYSTEMCTL" \
+  SYSTEMCTL_LOG="$TEST_LOG" \
+  EXPECTED_HOME="$TEST_HOME" \
+  EXPECTED_CONFIG="$INSTALLED_CONFIG" \
+  GOOGLE_APPLICATION_CREDENTIALS= \
+  CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE= \
+  CLOUDSDK_CONFIG= \
+  SPANNER_EMULATOR_HOST= \
+  CLAUDE_HISTORY_RAG_SERVER_PSK=fixture-secret \
+  "$TEST_HOME/Meridian/repos/ai-agent-history-rag-mcp/scripts/install-systemd.sh"
+require_literal "$INSTALLED_ENV" 'CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE=device_service_account' "default device_service_account profile"
+require_literal "$INSTALLED_ENV" 'CLAUDE_HISTORY_RAG_READ_ONLY=false' "default read_only=false in env"
+require_literal "$INSTALLED_UNIT" "WorkingDirectory=$TEST_HOME/Meridian/repos/ai-agent-history-rag-mcp" "mapped ~/Meridian WorkingDirectory"
+require_literal "$INSTALLED_UNIT" "ExecStart=$TEST_HOME/Meridian/repos/ai-agent-history-rag-mcp/bin/history-ragd supervise --config $INSTALLED_CONFIG" "mapped ~/Meridian binary path"
+jq -e --arg checkout "$TEST_HOME/Meridian/repos/ai-agent-history-rag-mcp" '.checkout_root == $checkout and .read_only == false' "$INSTALLED_CONFIG" >/dev/null || fail "default installer did not preserve mapped ~/Meridian checkout_root"
+pass "installer defaults to device_service_account and preserves mapped ~/Meridian checkout paths"
 
 # Exercise workload_identity_federation, CLAUDE_HISTORY_RAG_CREDENTIAL_HOME,
 # CLAUDE_HISTORY_RAG_EXTRA_WATCH_ROOTS, CLAUDE_HISTORY_RAG_CHECKOUT_ROOT, and

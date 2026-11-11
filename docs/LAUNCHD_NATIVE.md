@@ -1,8 +1,7 @@
 # Native launchd user agent
 
 `scripts/install-launchd.sh` installs `history-ragd supervise --config …` as a
-per-user LaunchAgent. It accepts only the production Spanner, Vertex,
-impersonated-ADC, and bearer-secret contract. It rejects local storage,
+per-user LaunchAgent from `~/Meridian/repos/ai-agent-history-rag-mcp` (`~/Meridian/repos/ai-agent-history-rag-mcp/bin/history-ragd`). By default on Velenza workstations it selects `CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE=device_service_account` with the host's own `kopia-<host>@jeeves-486102.iam.gserviceaccount.com` identity resolved from `~/.config/no13-backup/kopia-<host>.json`. It rejects local storage,
 emulators, credential-file overrides, public binds, and disabled authentication.
 
 The installer writes owner-only files at:

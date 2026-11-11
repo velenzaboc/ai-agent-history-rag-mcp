@@ -115,13 +115,16 @@ volumes when operating beyond a smoke test.
 
 ## Host service installation
 
+Every Velenza workstation maps its Meridian root at `~/Meridian` (`$HOME/Meridian`) and checks out this repository at `~/Meridian/repos/ai-agent-history-rag-mcp` with the compiled binary at `~/Meridian/repos/ai-agent-history-rag-mcp/bin/history-ragd`. Each workstation authenticates directly as its own `kopia-<host>@jeeves-486102.iam.gserviceaccount.com` identity from `~/.config/no13-backup/kopia-<host>.json` under `CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE=device_service_account` (accepting either a `service_account` key or an `external_account` X.509 certificate config without a synthetic `credential-home` directory or per-host flags).
+
 Host ingestion services bind only `127.0.0.1:4680`; do not open that listener to the
-network. Build the binary first, export the production contract, then install.
+network. Build the binary first, export `CLAUDE_HISTORY_RAG_SERVER_PSK`, then install from `~/Meridian/repos/ai-agent-history-rag-mcp`.
 
 ### macOS
 
 ```bash
-HISTORY_RAGD_BIN="$PWD/bin/history-ragd" ./scripts/install-launchd.sh
+cd ~/Meridian/repos/ai-agent-history-rag-mcp
+CLAUDE_HISTORY_RAG_SERVER_PSK="$CLAUDE_HISTORY_RAG_SERVER_PSK" HISTORY_RAGD_BIN="$PWD/bin/history-ragd" ./scripts/install-launchd.sh
 ./scripts/uninstall-launchd.sh
 ```
 
@@ -130,7 +133,8 @@ See [launchd operator notes](docs/LAUNCHD_NATIVE.md).
 ### Linux
 
 ```bash
-HISTORY_RAGD_BIN="$PWD/bin/history-ragd" ./scripts/install-systemd.sh
+cd ~/Meridian/repos/ai-agent-history-rag-mcp
+CLAUDE_HISTORY_RAG_SERVER_PSK="$CLAUDE_HISTORY_RAG_SERVER_PSK" HISTORY_RAGD_BIN="$PWD/bin/history-ragd" ./scripts/install-systemd.sh
 ./scripts/uninstall-systemd.sh
 ```
 
