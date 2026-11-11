@@ -38,28 +38,25 @@ path_uid() {
 }
 
 derive_workstation_identity() {
-  local candidates=() base="" host="" short=""
+  local candidates=() cred_file="" email="" base="" project="${CLAUDE_HISTORY_RAG_SPANNER_PROJECT:-jeeves-486102}"
   shopt -s nullglob
   candidates=("$HOME/.config/no13-backup"/kopia-*.json)
   shopt -u nullglob
   if [[ "${#candidates[@]}" -eq 1 ]]; then
-    base="$(basename "${candidates[0]}" .json)"
+    cred_file="${candidates[0]}"
+    chmod 600 "$cred_file" 2>/dev/null || true
+    email="$(jq -r '(.client_email // (.service_account_impersonation_url // "" | capture("serviceAccounts/(?<email>[^:]+)").email)) // empty' "$cred_file" 2>/dev/null || true)"
+    if [[ -n "$email" ]]; then
+      printf '%s' "$email"
+      return 0
+    fi
+    base="$(basename "$cred_file" .json)"
     if [[ "$base" =~ ^kopia-[a-z0-9-]+$ ]]; then
-      printf '%s@jeeves-486102.iam.gserviceaccount.com' "$base"
+      printf '%s@%s.iam.gserviceaccount.com' "$base" "$project"
       return 0
     fi
   fi
-  if command -v scutil >/dev/null 2>&1; then
-    host="$(scutil --get LocalHostName 2>/dev/null || true)"
-  fi
-  [[ -n "$host" ]] || host="$(hostname 2>/dev/null || true)"
-  short="$(printf '%s' "${host%%.*}" | tr '[:upper:]' '[:lower:]')"
-  case "$short" in
-    brandons-mac-mini|macmini|brandons-mini) printf 'kopia-macmini@jeeves-486102.iam.gserviceaccount.com' ;;
-    brandons-macbook-pro|macbook|brandons-mbp) printf 'kopia-macbook@jeeves-486102.iam.gserviceaccount.com' ;;
-    arcserver1|arcserver2|arcserver3|arcserver4) printf 'kopia-%s@jeeves-486102.iam.gserviceaccount.com' "$short" ;;
-    *) printf '' ;;
-  esac
+  printf ''
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -236,6 +233,9 @@ WATCH_ROOTS=()
 for root in "${DEFAULT_WATCH_ROOTS[@]}"; do
   require_absolute_clean "$root" "watch root"
   mkdir -p "$root"
+  if [[ -L "$root" && -d "$root" ]]; then
+    root="$(cd "$root" && pwd -P)"
+  fi
   chmod 700 "$root"
   [[ -d "$root" && ! -L "$root" ]] || fail "watch root must be a non-link directory"
   WATCH_ROOTS+=("$root")
@@ -273,6 +273,12 @@ CANONICAL_ROOTS=()
 for root in "${WATCH_ROOTS[@]}"; do
   CANONICAL_ROOTS+=("$(cd "$root" && pwd -P)")
 done
+if [[ "$RESET_FORWARD_CUTOFF" == false && -f "$STATE_DIR/forward.json" ]]; then
+  while IFS= read -r existing_root; do
+    [[ -n "$existing_root" && -d "$existing_root" && ! -L "$existing_root" ]] || continue
+    CANONICAL_ROOTS+=("$(cd "$existing_root" && pwd -P)")
+  done < <(jq -r '.roots[]?.path // empty' "$STATE_DIR/forward.json" 2>/dev/null || true)
+fi
 WATCH_ROOTS_JSON="$(printf '%s\n' "${CANONICAL_ROOTS[@]}" | LC_ALL=C sort -u | jq -Rcn '[inputs | select(length > 0)]')"
 
 cat > "$CONFIG_PATH" <<EOF
