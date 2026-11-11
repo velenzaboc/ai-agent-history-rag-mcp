@@ -37,11 +37,43 @@ path_uid() {
   fi
 }
 
+derive_workstation_identity() {
+  local candidates=() base="" host="" short=""
+  shopt -s nullglob
+  candidates=("$HOME/.config/no13-backup"/kopia-*.json)
+  shopt -u nullglob
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    base="$(basename "${candidates[0]}" .json)"
+    if [[ "$base" =~ ^kopia-[a-z0-9-]+$ ]]; then
+      printf '%s@jeeves-486102.iam.gserviceaccount.com' "$base"
+      return 0
+    fi
+  fi
+  if command -v scutil >/dev/null 2>&1; then
+    host="$(scutil --get LocalHostName 2>/dev/null || true)"
+  fi
+  [[ -n "$host" ]] || host="$(hostname 2>/dev/null || true)"
+  short="$(printf '%s' "${host%%.*}" | tr '[:upper:]' '[:lower:]')"
+  case "$short" in
+    brandons-mac-mini|macmini|brandons-mini) printf 'kopia-macmini@jeeves-486102.iam.gserviceaccount.com' ;;
+    brandons-macbook-pro|macbook|brandons-mbp) printf 'kopia-macbook@jeeves-486102.iam.gserviceaccount.com' ;;
+    arcserver1|arcserver2|arcserver3|arcserver4) printf 'kopia-%s@jeeves-486102.iam.gserviceaccount.com' "$short" ;;
+    *) printf '' ;;
+  esac
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-PROJECT_DIR="${CLAUDE_HISTORY_RAG_CHECKOUT_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
+DEFAULT_PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+MAPPED_PROJECT_DIR="$HOME/Meridian/repos/ai-agent-history-rag-mcp"
+if [[ -d "$MAPPED_PROJECT_DIR" && ! -L "$MAPPED_PROJECT_DIR" ]] && [[ "$(cd "$MAPPED_PROJECT_DIR" && pwd -P)" == "$DEFAULT_PROJECT_DIR" ]]; then
+  DEFAULT_PROJECT_DIR="$MAPPED_PROJECT_DIR"
+fi
+PROJECT_DIR="${CLAUDE_HISTORY_RAG_CHECKOUT_ROOT:-$DEFAULT_PROJECT_DIR}"
 require_absolute_clean "$PROJECT_DIR" "project directory"
 [[ -d "$PROJECT_DIR" && ! -L "$PROJECT_DIR" ]] || fail "project directory must be an existing non-link directory"
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+if [[ "$PROJECT_DIR" != "$MAPPED_PROJECT_DIR" ]]; then
+  PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+fi
 
 LABEL="com.ai-agent-history-rag.daemon"
 READ_ONLY="${CLAUDE_HISTORY_RAG_READ_ONLY:-false}"
@@ -63,8 +95,10 @@ require_absolute_clean "$CONFIG_DIR" "config directory"
 require_absolute_clean "$PLIST_DIR" "LaunchAgents directory"
 require_absolute_clean "$HISTORY_RAGD_BIN" "history-ragd binary"
 [[ -x "$HISTORY_RAGD_BIN" && ! -L "$HISTORY_RAGD_BIN" ]] || fail "history-ragd binary must be an executable non-link file"
-BIN_PARENT="$(cd "$(dirname "$HISTORY_RAGD_BIN")" && pwd -P)"
-HISTORY_RAGD_BIN="$BIN_PARENT/$(basename "$HISTORY_RAGD_BIN")"
+if [[ "$PROJECT_DIR" != "$MAPPED_PROJECT_DIR" || "$HISTORY_RAGD_BIN" != "$PROJECT_DIR"/* ]]; then
+  BIN_PARENT="$(cd "$(dirname "$HISTORY_RAGD_BIN")" && pwd -P)"
+  HISTORY_RAGD_BIN="$BIN_PARENT/$(basename "$HISTORY_RAGD_BIN")"
+fi
 case "$HISTORY_RAGD_BIN" in "$PROJECT_DIR"/*) ;; *) fail "history-ragd binary must be beneath the project directory" ;; esac
 
 SERVICE_HOME="$HOME"
@@ -86,6 +120,26 @@ fi
 
 # The production selector is deliberately closed: this launch agent has no
 # local database, emulator, credential-file override, public bind, or auth-off arm.
+PORT=4680
+if [[ "$READ_ONLY" == true ]]; then PORT=4681; fi
+CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT="${CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT:-production}"
+CLAUDE_HISTORY_RAG_STORAGE_BACKEND="${CLAUDE_HISTORY_RAG_STORAGE_BACKEND:-spanner}"
+CLAUDE_HISTORY_RAG_SPANNER_PROJECT="${CLAUDE_HISTORY_RAG_SPANNER_PROJECT:-jeeves-486102}"
+CLAUDE_HISTORY_RAG_SPANNER_INSTANCE="${CLAUDE_HISTORY_RAG_SPANNER_INSTANCE:-jeeves-rg-spanner-prod-4d0e4c43}"
+CLAUDE_HISTORY_RAG_SPANNER_DATABASE="${CLAUDE_HISTORY_RAG_SPANNER_DATABASE:-ai-agent-history-rag}"
+CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE="${CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE:-spanner}"
+CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID="${CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODEL_ID:-ConversationEmbeddingModel}"
+CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER="${CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER:-vertex}"
+CLAUDE_HISTORY_RAG_EMBEDDING_MODEL="${CLAUDE_HISTORY_RAG_EMBEDDING_MODEL:-gemini-embedding-001}"
+CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION="${CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION:-3072}"
+CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST="${CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST:-127.0.0.1}"
+CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT="${CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT:-$PORT}"
+CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE="${CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE:-application_default}"
+CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE="${CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE:-device_service_account}"
+if [[ -z "${CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY:-}" ]]; then
+  CLAUDE_HISTORY_RAG_CREDENTIALS_IDENTITY="$(derive_workstation_identity)"
+fi
+
 require_exact CLAUDE_HISTORY_RAG_RUNTIME_CONTRACT production
 require_exact CLAUDE_HISTORY_RAG_STORAGE_BACKEND spanner
 require_exact CLAUDE_HISTORY_RAG_SPANNER_EMBEDDING_MODE spanner
@@ -94,8 +148,6 @@ require_exact CLAUDE_HISTORY_RAG_EMBEDDING_PROVIDER vertex
 require_exact CLAUDE_HISTORY_RAG_EMBEDDING_MODEL gemini-embedding-001
 require_exact CLAUDE_HISTORY_RAG_EMBEDDING_DIMENSION 3072
 require_exact CLAUDE_HISTORY_RAG_STATUS_SERVER_HOST 127.0.0.1
-PORT=4680
-if [[ "$READ_ONLY" == true ]]; then PORT=4681; fi
 require_exact CLAUDE_HISTORY_RAG_STATUS_SERVER_PORT "$PORT"
 require_exact CLAUDE_HISTORY_RAG_CREDENTIALS_SOURCE application_default
 case "${CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE:-}" in impersonated_service_account|device_service_account) ;; *) fail "unsupported credential profile" ;; esac

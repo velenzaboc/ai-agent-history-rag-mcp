@@ -1,7 +1,7 @@
 # Native systemd user service
 
 `scripts/install-systemd.sh` installs the native `history-ragd` foreground
-process as a per-user systemd unit. It is intentionally a production-only
+process as a per-user systemd unit from `~/Meridian/repos/ai-agent-history-rag-mcp` (`~/Meridian/repos/ai-agent-history-rag-mcp/bin/history-ragd`). By default on Velenza workstations it selects `CLAUDE_HISTORY_RAG_CREDENTIALS_PROFILE=device_service_account` with the host's own `kopia-<host>@jeeves-486102.iam.gserviceaccount.com` identity resolved from `~/.config/no13-backup/kopia-<host>.json` and includes `UnsetEnvironment=` in the unit to isolate the service from ambient session overrides. It is intentionally a production-only
 installer: it refuses a local database, emulator, credential-file override,
 public bind, unauthenticated mode, or a partial Spanner/Vertex configuration.
 
