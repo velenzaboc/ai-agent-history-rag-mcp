@@ -38,28 +38,25 @@ path_uid() {
 }
 
 derive_workstation_identity() {
-  local candidates=() base="" host="" short=""
+  local candidates=() cred_file="" email="" base="" project="${CLAUDE_HISTORY_RAG_SPANNER_PROJECT:-jeeves-486102}"
   shopt -s nullglob
   candidates=("$HOME/.config/no13-backup"/kopia-*.json)
   shopt -u nullglob
   if [[ "${#candidates[@]}" -eq 1 ]]; then
-    base="$(basename "${candidates[0]}" .json)"
+    cred_file="${candidates[0]}"
+    chmod 600 "$cred_file" 2>/dev/null || true
+    email="$(jq -r '(.client_email // (.service_account_impersonation_url // "" | capture("serviceAccounts/(?<email>[^:]+)").email)) // empty' "$cred_file" 2>/dev/null || true)"
+    if [[ -n "$email" ]]; then
+      printf '%s' "$email"
+      return 0
+    fi
+    base="$(basename "$cred_file" .json)"
     if [[ "$base" =~ ^kopia-[a-z0-9-]+$ ]]; then
-      printf '%s@jeeves-486102.iam.gserviceaccount.com' "$base"
+      printf '%s@%s.iam.gserviceaccount.com' "$base" "$project"
       return 0
     fi
   fi
-  if command -v scutil >/dev/null 2>&1; then
-    host="$(scutil --get LocalHostName 2>/dev/null || true)"
-  fi
-  [[ -n "$host" ]] || host="$(hostname 2>/dev/null || true)"
-  short="$(printf '%s' "${host%%.*}" | tr '[:upper:]' '[:lower:]')"
-  case "$short" in
-    brandons-mac-mini|macmini|brandons-mini) printf 'kopia-macmini@jeeves-486102.iam.gserviceaccount.com' ;;
-    brandons-macbook-pro|macbook|brandons-mbp) printf 'kopia-macbook@jeeves-486102.iam.gserviceaccount.com' ;;
-    arcserver1|arcserver2|arcserver3|arcserver4) printf 'kopia-%s@jeeves-486102.iam.gserviceaccount.com' "$short" ;;
-    *) printf '' ;;
-  esac
+  printf ''
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -199,6 +196,9 @@ if [[ "$READ_ONLY" == false ]]; then
   for root in "${DEFAULT_WATCH_ROOTS[@]}"; do
     require_absolute_clean "$root" "watch root"
     mkdir -p "$root"
+    if [[ -L "$root" && -d "$root" ]]; then
+      root="$(cd "$root" && pwd -P)"
+    fi
     chmod 700 "$root"
     [[ -d "$root" && ! -L "$root" ]] || fail "watch root must be a non-link directory"
     WATCH_ROOTS+=("$root")
@@ -237,6 +237,12 @@ if [[ "$READ_ONLY" == false ]]; then
   for root in "${WATCH_ROOTS[@]}"; do
     CANONICAL_ROOTS+=("$(cd "$root" && pwd -P)")
   done
+  if [[ "$RESET_FORWARD_CUTOFF" == false && -f "$STATE_DIR/forward.json" ]]; then
+    while IFS= read -r existing_root; do
+      [[ -n "$existing_root" && -d "$existing_root" && ! -L "$existing_root" ]] || continue
+      CANONICAL_ROOTS+=("$(cd "$existing_root" && pwd -P)")
+    done < <(jq -r '.roots[]?.path // empty' "$STATE_DIR/forward.json" 2>/dev/null || true)
+  fi
   WATCH_ROOTS_JSON="$(printf '%s\n' "${CANONICAL_ROOTS[@]}" | LC_ALL=C sort -u | jq -Rcn '[inputs | select(length > 0)]')"
 fi
 
@@ -261,6 +267,21 @@ if [[ -n "${CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY:-}" ]]; then
   BASE_IDENTITY_PLIST_ENTRY="    <key>CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY</key><string>$CLAUDE_HISTORY_RAG_CREDENTIALS_BASE_IDENTITY</string>"$'\n'
 fi
 
+REAL_PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
+PROGRAM_ARGS_XML="    <string>$HISTORY_RAGD_BIN</string>
+    <string>supervise</string>
+    <string>--config</string>
+    <string>$CONFIG_PATH</string>"
+if [[ "$PROJECT_DIR" == "$MAPPED_PROJECT_DIR" && "$REAL_PROJECT_DIR" == /Volumes/* && -x /opt/homebrew/bin/node ]]; then
+  PROGRAM_ARGS_XML="    <string>/opt/homebrew/bin/node</string>
+    <string>-e</string>
+    <string>const {spawn}=require(&quot;child_process&quot;);const c=spawn(process.argv[1],process.argv.slice(2),{stdio:&quot;inherit&quot;});process.on(&quot;SIGTERM&quot;,()=>c.kill(&quot;SIGTERM&quot;));process.on(&quot;SIGINT&quot;,()=>c.kill(&quot;SIGINT&quot;));c.on(&quot;exit&quot;,(code,sig)=>process.exit(code!==null?code:1));</string>
+    <string>$HISTORY_RAGD_BIN</string>
+    <string>supervise</string>
+    <string>--config</string>
+    <string>$CONFIG_PATH</string>"
+fi
+
 cat > "$PLIST_DEST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -269,10 +290,7 @@ cat > "$PLIST_DEST" <<EOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$HISTORY_RAGD_BIN</string>
-    <string>supervise</string>
-    <string>--config</string>
-    <string>$CONFIG_PATH</string>
+$PROGRAM_ARGS_XML
   </array>
   <key>WorkingDirectory</key><string>$PROJECT_DIR</string>
   <key>EnvironmentVariables</key>
