@@ -159,6 +159,9 @@ pass "installer writes protected native loopback LaunchAgent with nine pre-creat
 
 # Exercise default workstation derivation (only CLAUDE_HISTORY_RAG_SERVER_PSK required)
 # and mapped ~/Meridian checkout preservation.
+mkdir -p -m 700 "$TEST_HOME/.config/no13-backup"
+printf '{"type":"service_account"}\n' > "$TEST_HOME/.config/no13-backup/kopia-macmini.json"
+chmod 600 "$TEST_HOME/.config/no13-backup/kopia-macmini.json"
 MAPPED_STORAGE="$TMP_DIR/meridian-storage"
 mkdir -p "$MAPPED_STORAGE/repos/ai-agent-history-rag-mcp/bin"
 cp -R "$ROOT_DIR/scripts" "$MAPPED_STORAGE/repos/ai-agent-history-rag-mcp/scripts"

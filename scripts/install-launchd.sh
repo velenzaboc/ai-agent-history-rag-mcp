@@ -38,7 +38,17 @@ path_uid() {
 }
 
 derive_workstation_identity() {
-  local host="" short=""
+  local candidates=() base="" host="" short=""
+  shopt -s nullglob
+  candidates=("$HOME/.config/no13-backup"/kopia-*.json)
+  shopt -u nullglob
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    base="$(basename "${candidates[0]}" .json)"
+    if [[ "$base" =~ ^kopia-[a-z0-9-]+$ ]]; then
+      printf '%s@jeeves-486102.iam.gserviceaccount.com' "$base"
+      return 0
+    fi
+  fi
   if command -v scutil >/dev/null 2>&1; then
     host="$(scutil --get LocalHostName 2>/dev/null || true)"
   fi
