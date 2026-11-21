@@ -639,6 +639,112 @@ func TestForwardEligibilityMetadataAndMixedExports(t *testing.T) {
 	}
 }
 
+// claudeCodeUntimedRecords mirrors the timestamp-less records Claude Code 2.1
+// writes beside conversational turns: api-request-blob copies of the request
+// (system, user and assistant roles with message content), last-prompt and
+// custom-title.
+func claudeCodeUntimedRecords(t *testing.T, session string) []byte {
+	t.Helper()
+	return coverageJSONLines(t,
+		map[string]any{"type": "api-request-blob", "sessionId": session, "message": map[string]any{"role": "system", "content": "request blob system prompt copy"}},
+		map[string]any{"type": "api-request-blob", "sessionId": session, "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": "request blob user prompt copy"}}}},
+		map[string]any{"type": "api-request-blob", "sessionId": session, "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "request blob assistant reply copy"}}}},
+		map[string]any{"type": "last-prompt", "sessionId": session, "lastPrompt": "request blob last prompt"},
+		map[string]any{"type": "custom-title", "sessionId": session, "customTitle": "Forward eligibility session"},
+	)
+}
+
+func scanClaudeCodeForwardSession(t *testing.T, session string, payload []byte) (*recordingSink, forwardState, string) {
+	t.Helper()
+	sourceRoot := t.TempDir()
+	state, _ := openForwardState(t)
+	sink := &recordingSink{}
+	producer, err := NewForwardProducer(Registry{MachineID: "claude-host", MaxBytes: MaxSourceSnapshotBytes}, sink, []string{sourceRoot}, time.Second, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = producer.Close() })
+	path := filepath.Clean(filepath.Join(sourceRoot, "projects", "-work-forward", session+".jsonl"))
+	writeForwardFile(t, path, payload)
+	if err := producer.Scan(context.Background()); err != nil {
+		t.Fatalf("Scan Claude Code session: %v", err)
+	}
+	persisted, err := loadForwardState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sink, persisted, path
+}
+
+func TestForwardProducerCapturesClaudeCodeSessionWithUntimedRequestBlobs(t *testing.T) {
+	const session = "5d0c9f1e-claude-blob-fresh"
+	future := time.Now().UTC().Add(24 * time.Hour)
+	payload := append(claudeCodeUntimedRecords(t, session), forwardTurn(session, "fresh", future)...)
+	payload = append(payload, claudeCodeUntimedRecords(t, session)...)
+	sink, persisted, path := scanClaudeCodeForwardSession(t, session, payload)
+	if persisted.ExcludedPaths[path] || persisted.ExcludedSessions[session] {
+		t.Fatalf("post-cutoff Claude Code session refused: paths=%#v sessions=%#v", persisted.ExcludedPaths, persisted.ExcludedSessions)
+	}
+	if persisted.Progress[path] == "" {
+		t.Fatal("post-cutoff Claude Code session progress was not persisted")
+	}
+	if len(sink.chunks) != 1 || len(sink.chunks[0]) == 0 {
+		t.Fatalf("post-cutoff Claude Code session batches = %#v", sink.chunks)
+	}
+	turnSeen := false
+	for _, chunk := range sink.chunks[0] {
+		if strings.Contains(chunk.Content, "request blob") {
+			t.Fatalf("request blob content uploaded: %#v", chunk)
+		}
+		if chunk.SessionID != session || chunk.Timestamp.Before(persisted.Cutoff) {
+			t.Fatalf("chunk provenance = session:%q time:%v cutoff:%v", chunk.SessionID, chunk.Timestamp, persisted.Cutoff)
+		}
+		turnSeen = turnSeen || (chunk.ChunkType == "turn" && strings.Contains(chunk.Content, "forward user fresh") && strings.Contains(chunk.Content, "forward assistant fresh"))
+	}
+	if !turnSeen {
+		t.Fatalf("conversational turn missing from upload: %#v", sink.chunks[0])
+	}
+}
+
+func TestForwardProducerRefusesClaudeCodeSessionWithPreCutoffTurnDespiteUntimedRecords(t *testing.T) {
+	const session = "5d0c9f1e-claude-blob-historical"
+	payload := append(claudeCodeUntimedRecords(t, session), forwardTurn(session, "old", time.Now().UTC().Add(-24*time.Hour))...)
+	payload = append(payload, forwardTurn(session, "new-tail", time.Now().UTC().Add(24*time.Hour))...)
+	sink, persisted, path := scanClaudeCodeForwardSession(t, session, payload)
+	if len(sink.chunks) != 0 {
+		t.Fatalf("pre-cutoff Claude Code session uploaded: %d batches", len(sink.chunks))
+	}
+	if !persisted.ExcludedPaths[path] || !persisted.ExcludedSessions[session] {
+		t.Fatalf("pre-cutoff Claude Code session not durably refused: paths=%#v sessions=%#v", persisted.ExcludedPaths, persisted.ExcludedSessions)
+	}
+}
+
+func TestForwardProducerRefusesClaudeCodeConversationalRecordWithoutTimestamp(t *testing.T) {
+	for _, role := range []string{"user", "assistant"} {
+		t.Run(role, func(t *testing.T) {
+			session := "5d0c9f1e-claude-untimed-" + role
+			content := any("untimed " + role + " turn")
+			if role == "assistant" {
+				content = []any{map[string]any{"type": "text", "text": "untimed assistant turn"}}
+			}
+			payload := append(claudeCodeUntimedRecords(t, session), forwardTurn(session, "fresh", time.Now().UTC().Add(24*time.Hour))...)
+			payload = append(payload, coverageJSONLines(t, map[string]any{
+				"type":      role,
+				"uuid":      "untimed-" + role,
+				"sessionId": session,
+				"message":   map[string]any{"role": role, "content": content},
+			})...)
+			sink, persisted, path := scanClaudeCodeForwardSession(t, session, payload)
+			if len(sink.chunks) != 0 {
+				t.Fatalf("untimed %s record uploaded: %d batches", role, len(sink.chunks))
+			}
+			if !persisted.ExcludedPaths[path] || !persisted.ExcludedSessions[session] {
+				t.Fatalf("untimed %s record not durably refused: paths=%#v sessions=%#v", role, persisted.ExcludedPaths, persisted.ExcludedSessions)
+			}
+		})
+	}
+}
+
 func TestForwardReconcilesVolumeDriftSupersetRootsAndUnsafeSources(t *testing.T) {
 	root1 := t.TempDir()
 	root2 := t.TempDir()

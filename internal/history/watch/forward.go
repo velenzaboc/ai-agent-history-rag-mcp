@@ -663,7 +663,7 @@ func inspectForwardEligibilityWithExclusions(kind SourceKind, snapshot *Snapshot
 				sessions = append(sessions, entry.SessionID)
 			}
 			if !entry.HasTimestamp {
-				if entry.Message != nil {
+				if entry.ChunkedMessage() {
 					return forwardRefuse, sessions
 				}
 				continue
