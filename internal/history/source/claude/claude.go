@@ -61,6 +61,17 @@ type Entry struct {
 	MetadataOnly   bool
 }
 
+// ChunkedMessage reports whether Chunks turns this entry's message into stored
+// content: user and assistant turns and session summaries. Other entry types
+// that carry a message, such as api-request-blob request copies, are never
+// chunked.
+func (e Entry) ChunkedMessage() bool {
+	if e.Message == nil {
+		return false
+	}
+	return e.CompactSummary || e.Type == "summary" || e.Type == "user" || e.Type == "assistant"
+}
+
 type LocatedEntry struct {
 	Entry Entry
 	Line  int

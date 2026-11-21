@@ -158,6 +158,43 @@ func TestContentToolOperationsAndSplittingAreStable(t *testing.T) {
 	}
 }
 
+func TestChunksIgnoresAPIRequestBlobsAndChunkedMessageMatches(t *testing.T) {
+	input := strings.Join([]string{
+		`{"type":"api-request-blob","sessionId":"blob-session","message":{"role":"system","content":"request blob system prompt copy"}}`,
+		`{"type":"user","uuid":"u1","sessionId":"blob-session","timestamp":"2026-11-21T10:00:00Z","message":{"role":"user","content":"Fix the watcher."}}`,
+		`{"type":"api-request-blob","sessionId":"blob-session","message":{"role":"user","content":[{"type":"text","text":"request blob user prompt copy"}]}}`,
+		`{"type":"assistant","uuid":"a1","sessionId":"blob-session","timestamp":"2026-11-21T10:00:01Z","message":{"role":"assistant","model":"claude-test","content":[{"type":"text","text":"Fixed."}]}}`,
+		`{"type":"api-request-blob","sessionId":"blob-session","message":{"role":"assistant","content":[{"type":"text","text":"request blob assistant reply copy"}]}}`,
+		`{"type":"last-prompt","sessionId":"blob-session","lastPrompt":"request blob last prompt"}`,
+	}, "\n") + "\n"
+	chunks, issues, err := Chunks(strings.NewReader(input), Source{ProjectEncoded: "-work-watcher", FilePath: "/history/-work-watcher/blob-session.jsonl", MachineID: "test-machine"})
+	if err != nil || len(issues) != 0 {
+		t.Fatalf("Chunks err=%v issues=%#v", err, issues)
+	}
+	if len(chunks) != 1 || chunks[0].ChunkType != "turn" || chunks[0].Content != "In project watcher, user asked:\nFix the watcher.\n\nAssistant responded:\nFixed." {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	entries, _, err := Parse(strings.NewReader(input), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, located := range entries {
+		entry := located.Entry
+		want := entry.Type == "user" || entry.Type == "assistant"
+		if entry.Type == "api-request-blob" && entry.Message == nil {
+			t.Fatalf("api-request-blob line %d message not parsed", located.Line)
+		}
+		if got := entry.ChunkedMessage(); got != want {
+			t.Fatalf("line %d %s ChunkedMessage() = %t, want %t", located.Line, entry.Type, got, want)
+		}
+	}
+	summary := Entry{Type: "summary", Message: &Message{Content: "summary text"}}
+	compact := Entry{Type: "user", CompactSummary: true, Message: &Message{Content: "compacted"}}
+	if !summary.ChunkedMessage() || !compact.ChunkedMessage() || (Entry{Type: "user"}).ChunkedMessage() {
+		t.Fatal("ChunkedMessage disagrees with the summary chunk path or a message-less user entry")
+	}
+}
+
 func chunkIDs(chunks []store.Chunk) []string {
 	ids := make([]string, len(chunks))
 	for index := range chunks {
